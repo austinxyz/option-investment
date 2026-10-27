@@ -123,6 +123,21 @@ def test_gate_stale_quotes_unchecked_not_fail():
     assert any("报价陈旧" in w for w in g.warnings)
 
 
+def test_gate_missing_oi_unchecked_with_warning_not_fail():
+    """Real AAPL 2026-10-26 after the close: Yahoo returned OI 0 on every strike (missing data)."""
+    g = judge_gate(gate_inputs(atm_oi=None))
+    assert g.passed
+    assert item(g, "AtmOI").result == "unchecked"
+    assert text.WARN["oi_missing"] in g.warnings
+
+
+def test_gate_real_low_oi_still_fails():
+    g = judge_gate(gate_inputs(atm_oi=120))
+    assert not g.passed
+    assert item(g, "AtmOI").result == "fail"
+    assert text.WARN["oi_missing"] not in g.warnings
+
+
 def test_gate_no_expiry_in_20_60_skips_three_items():
     g = judge_gate(gate_inputs(expiry_used=None))
     assert g.passed

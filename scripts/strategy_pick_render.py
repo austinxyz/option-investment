@@ -18,7 +18,10 @@ import option_labels
 import strategy_pick_rules as R
 import strategy_pick_steps as S
 import strategy_pick_text as T
+from strategy_pick_text import (CLASS_ONLY_FLAG, FLAG_LABELS, HIDDEN_FLAGS,  # noqa: F401
+                                LEG_LABELS)  # re-exported
 from spread_core import expected_move
+from strategy_pick_diagram_frame import diagram_alt
 from strategy_pick_inputs import Earnings, Gate, Holding, IvPosition, ViewDecision
 from strategy_pick_metrics import Metrics
 from strategy_pick_regime import Regime
@@ -42,7 +45,6 @@ SHARE_FLAG = "portfolio_share="
 # Only a rounded share is written (whole percent), so the file cannot be used to back out the
 # portfolio value from the reference strike.
 SHARE_DECIMALS = 2
-CLASS_ONLY_FLAG = "rank_by_class_only"
 _PAIR = frozenset({R.CSP_KEY, R.BULL_PUT_KEY})
 # Constants every run relies on even when no Evidence row names them.
 BASE_CONSTANTS = ("LOOKBACK_DAYS", "MIN_HISTORY_DAYS", "MIN_SLOPE_DAYS", "MA_SHORT", "MA_LONG",
@@ -56,15 +58,6 @@ BASE_CONSTANTS = ("LOOKBACK_DAYS", "MIN_HISTORY_DAYS", "MIN_SLOPE_DAYS", "MA_SHO
 TARGET_CONSTANTS = ("NORMAL_DELTA", "FAR_OTM_DELTA", "BULLCALL_LONG_DELTA", "CONDOR_SHORT_DELTA",
                     "COLLAR_PUT_DELTA", "COLLAR_CALL_DELTA", "Z_BY_DELTA", "REF_DECIMALS")
 RANK_CONSTANTS = ("CSP_MAX_PORTFOLIO_SHARE", "CSP_FIRST_CLASSES", "CONTRACT_MULTIPLIER")
-FLAG_LABELS = {"far_otm": "远价外", "thin_premium": "权利金薄", "required_win_rate": "所需胜率高",
-               "want_shares_only": "只在真想接股时做", "premium_average": "权利金一般",
-               "earnings_before_expiry": "到期日须早于财报日", "ex_dividend": "除息日在窗口内",
-               "ltcg_reset": "持有期会被重置", "reduce_hint": "考虑减仓",
-               CLASS_ONLY_FLAG: "组合总值取不到，只按类别排序"}
-# Shown as a warning line instead: it is about the shares held, not about this pick.
-HIDDEN_FLAGS = frozenset({"reduce_hint"})
-LEG_LABELS = {"short_put": "短 Put", "short_call": "短 Call", "long_call": "长 Call",
-              "long_put": "长 Put"}
 
 
 @dataclass(frozen=True)
@@ -348,9 +341,13 @@ def _why_not(result: dict) -> list[str]:
     return lines
 
 
-def render_markdown(result: dict) -> str:
+def render_markdown(result: dict, diagram: str | None = None) -> str:
+    """`diagram` is the svg file name; its image paragraph sits under the title (after the
+    Yahoo / demo banner, which with_banner puts right below the title). None: no image line."""
     head = [f"# {result['ticker']} 策略推荐（运行日 {result['run_date']}，"
             f"行情快照 {result['snapshot_date']}）", ""]
+    if diagram is not None:
+        head += [f"![{diagram_alt(result)}]({diagram})", ""]
     steps = ["## 七步逐步表", "", *S.table(S.STEP_HEADER, S.step_rows(result))]
     warnings = ["## 警告", "", *([f"- {w}" for w in result["warnings"]] or ["无"])]
     limits = ["## 局限", "", *[f"- {line}" for line in LIMITS]]
@@ -362,7 +359,8 @@ def render_markdown(result: dict) -> str:
 
 # ---- console ----
 
-def render_console(result: dict, md_path: Path, json_path: Path) -> str:
+def render_console(result: dict, md_path: Path, json_path: Path,
+                   svg_path: Path | None = None) -> str:
     m, iv = result["metrics"], result["iv"]
     lines = [f"{result['ticker']} 策略推荐 {result['run_date']}（行情快照 {result['snapshot_date']}）",
              f"叶子：{result['leaf_id']}（{leaf_text(result['leaf_id'])}）",
@@ -374,6 +372,7 @@ def render_console(result: dict, md_path: Path, json_path: Path) -> str:
                if iv["percentile"] is not None else "未计算")
     lines += [f"关键数字：R1y {S.signed_pct(m['r1y'])}｜RV1y {S.pct(m['rv1y'])}｜"
               f"MaxDD {S.pct(m['max_dd'])}｜IV 位置 {iv_text}",
-              f"警告 {len(result['warnings'])} 条（报告里逐条列出）",
-              f"报告：{md_path}", f"数据：{json_path}", DISCLAIMER]
+              f"警告 {len(result['warnings'])} 条（报告里逐条列出）"]
+    lines += [f"路径图：{svg_path}"] if svg_path is not None else []
+    lines += [f"报告：{md_path}", f"数据：{json_path}", DISCLAIMER]
     return "\n".join(lines)

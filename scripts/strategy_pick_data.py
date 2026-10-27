@@ -168,13 +168,25 @@ def _listed_strike(chain, strike: float) -> float | None:
     return min(listed, key=lambda s: (abs(s - strike), s)) if listed else None
 
 
+def _oi_unavailable(chain, at: float) -> bool:
+    """True when every put and call within GATE_STRIKE_RANGE_PCT of `at` has OI 0 or NaN.
+    Yahoo blanks OI outside regular hours (2026-10-26: AAPL / SPY / QQQ all 0 near the money, only
+    stale deep-ITM strikes kept a value); a real thin name still shows some OI near the money."""
+    band = R.GATE_STRIKE_RANGE_PCT * at
+    for frame in (chain.puts, chain.calls):
+        near = frame[(frame["strike"] - at).abs() <= band]["openInterest"]
+        if any(v == v and float(v) > 0 for v in near):
+            return False
+    return True
+
+
 def atm_open_interest(ticker: str, expiry: date, strike: float) -> int | None:
-    """Put + call open interest at one strike (nearest listed); None on any failure or when
-    neither side has it."""
+    """Put + call open interest at one strike (nearest listed); None on any failure, when
+    neither side has it, or when the whole near-money chain reads 0 / NaN (data missing)."""
     try:
         chain = _ticker(ticker).option_chain(expiry.isoformat())
         at = _listed_strike(chain, strike)
-        if at is None:
+        if at is None or _oi_unavailable(chain, at):
             return None
         parts = [oi for oi in (_oi_at(chain.puts, at), _oi_at(chain.calls, at)) if oi is not None]
     except Exception:

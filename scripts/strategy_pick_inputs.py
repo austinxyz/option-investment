@@ -85,6 +85,8 @@ def _expiry_items(g: GateInputs, warnings: list[str]) -> list[Evidence]:
         warnings.append(T.WARN["no_expiry"])
     elif put is None or call is None:
         warnings.append(T.WARN["stale_quotes"])
+    if has_expiry and g.atm_oi is None:
+        warnings.append(T.WARN["oi_missing"])
     return [_check("Strikes15pct", g.strikes_15pct if has_expiry else None, ">=",
                    "MIN_STRIKES_15PCT"),
             _check("PutSpreadPct", put, "<=", "GATE_MAX_SPREAD_PCT"),

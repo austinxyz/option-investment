@@ -16,6 +16,8 @@ import positions
 import spread_data
 import strategy_pick as cli
 import strategy_pick_data as D
+import strategy_pick_diagram
+import strategy_pick_output as output
 from ibkr_session import GatewayUnavailable
 
 # Captured before any test stubs the module.
@@ -34,16 +36,34 @@ def load(out_dir, ticker="ZZZQ") -> dict:
     return json.loads(outputs(out_dir, ticker)[1].read_text(encoding="utf-8"))
 
 
-def test_cli_base_example_writes_two_files_exit_0(monkeypatch, tmp_path, capsys):
+def svg_of(out_dir, ticker="ZZZQ", day=RUN_DATE):
+    return out_dir / f"{day.isoformat()}-{ticker}.svg"
+
+
+def three(out_dir, ticker="ZZZQ") -> list:
+    return [*outputs(out_dir, ticker), svg_of(out_dir, ticker)]
+
+
+def no_leftovers(out_dir) -> bool:
+    return not [n for n in written(out_dir) if n.endswith((".tmp", ".bak"))]
+
+
+def svg_bytes(doc, label=None) -> bytes:
+    return strategy_pick_diagram.render_svg(doc, label).encode("utf-8")
+
+
+def test_cli_base_example_writes_three_files_exit_0(monkeypatch, tmp_path, capsys):
     install(monkeypatch, tmp_path)
     assert run(["ZZZQ"]) == 0
-    md, js = outputs(tmp_path)
-    assert written(tmp_path) == sorted([md.name, js.name])
-    assert md.name == "2026-10-25-ZZZQ.md"
+    md, js, svg = three(tmp_path)
+    assert written(tmp_path) == sorted([md.name, js.name, svg.name])
+    assert md.name == "2026-10-25-ZZZQ.md" and svg.name == "2026-10-25-ZZZQ.svg"
     doc = load(tmp_path)
     assert doc["run_date"] == "2026-10-25" and doc["snapshot_date"] == "2026-10-23"
     out = capsys.readouterr().out
     assert str(md) in out and str(js) in out
+    assert f"路径图：{svg}\n报告：{md}\n" in out
+    assert svg.read_bytes() == svg_bytes(doc)
 
 
 def test_cli_gateway_down_exit_1_no_files(monkeypatch, tmp_path, capsys):
@@ -224,10 +244,15 @@ def test_cli_history_under_year_warns(monkeypatch, tmp_path):
 def test_cli_same_day_rerun_overwrites(monkeypatch, tmp_path):
     install(monkeypatch, tmp_path)
     assert run(["ZZZQ"]) == 0
+    before = [p.read_bytes() for p in three(tmp_path)]
     install(monkeypatch, tmp_path, read_thesis=thesis(status="watch"))
     assert run(["ZZZQ"]) == 0
-    assert len(written(tmp_path)) == 2
-    assert load(tmp_path)["view"] == "neutral"
+    assert len(written(tmp_path)) == 3
+    doc = load(tmp_path)
+    assert doc["view"] == "neutral"
+    after = [p.read_bytes() for p in three(tmp_path)]
+    assert all(a != b for a, b in zip(after, before))
+    assert after[2] == svg_bytes(doc)
 
 
 def test_cli_lowercase_and_dotted_ticker(monkeypatch, tmp_path):
@@ -295,19 +320,19 @@ def test_cli_never_writes_outside_output_dir(monkeypatch, tmp_path):
     assert run(["ZZZQ", "--class", "bluechip"]) == 0
     assert load(out)["thesis_status"] == "active"
     assert [_tree_digest(p) for p in watched] == before
-    assert written(out) == ["2026-10-25-ZZZQ.json", "2026-10-25-ZZZQ.md"]
+    assert written(out) == ["2026-10-25-ZZZQ.json", "2026-10-25-ZZZQ.md", "2026-10-25-ZZZQ.svg"]
 
 
 def test_cli_write_failure_leaves_no_orphan(monkeypatch, tmp_path):
     install(monkeypatch, tmp_path)
-    real_replace, calls = cli.os.replace, []
+    real_replace, calls = output.os.replace, []
 
     def flaky(src, dst):
         calls.append(dst)
         if len(calls) == 2:  # the .md is in place, the .json move fails
             raise OSError("disk full")
         real_replace(src, dst)
-    monkeypatch.setattr(cli.os, "replace", flaky)
+    monkeypatch.setattr(output.os, "replace", flaky)
     assert run(["ZZZQ"]) == 1
     assert written(tmp_path) == []
 
@@ -368,19 +393,134 @@ def test_cli_other_data_errors_exit_1(monkeypatch, tmp_path, message):
     assert written(tmp_path) == []
 
 
-def test_cli_rerun_write_failure_keeps_previous_pair(monkeypatch, tmp_path):
+def _previous_three(monkeypatch, tmp_path):
     install(monkeypatch, tmp_path)
     assert run(["ZZZQ"]) == 0
-    md, js = outputs(tmp_path)
-    old_md, old_js = md.read_bytes(), js.read_bytes()
+    paths = three(tmp_path)
+    old = [p.read_bytes() for p in paths]
     install(monkeypatch, tmp_path, read_thesis=thesis(status="watch"))
-    real_replace = cli.os.replace
+    return paths, old
+
+
+def _fail_replace_of(monkeypatch, suffix):
+    real_replace = output.os.replace
 
     def flaky(src, dst):
-        if str(src).endswith(".json.tmp"):
+        if str(src).endswith(suffix):
             raise OSError("disk full")
         real_replace(src, dst)
-    monkeypatch.setattr(cli.os, "replace", flaky)
+    monkeypatch.setattr(output.os, "replace", flaky)
+
+
+def test_cli_rerun_write_failure_keeps_previous_three(monkeypatch, tmp_path):
+    paths, old = _previous_three(monkeypatch, tmp_path)
+    _fail_replace_of(monkeypatch, ".json.tmp")
     assert run(["ZZZQ"]) == 1
-    assert md.read_bytes() == old_md and js.read_bytes() == old_js
+    assert [p.read_bytes() for p in paths] == old
+    assert written(tmp_path) == sorted(p.name for p in paths)
+
+
+def test_cli_svg_replace_failure_restores_all_three(monkeypatch, tmp_path, capsys):
+    paths, old = _previous_three(monkeypatch, tmp_path)
+    _fail_replace_of(monkeypatch, ".svg.tmp")
+    assert run(["ZZZQ"]) == 1
+    assert [p.read_bytes() for p in paths] == old
+    assert written(tmp_path) == sorted(p.name for p in paths)
+    assert no_leftovers(tmp_path)
+    assert "写报告失败" in capsys.readouterr().err
+
+
+def _boom(*a, **k):
+    raise ValueError("diagram broke")
+
+
+def test_cli_diagram_error_degrades(monkeypatch, tmp_path, capsys):
+    paths, _ = _previous_three(monkeypatch, tmp_path)
+    md, js, svg = paths
+    assert svg.exists()
+    monkeypatch.setattr(strategy_pick_diagram, "render_svg", _boom)
+    capsys.readouterr()
+    assert run(["ZZZQ"]) == 0
     assert written(tmp_path) == sorted([md.name, js.name])
+    assert not svg.exists() and no_leftovers(tmp_path)
+    assert "![" not in md.read_text(encoding="utf-8")
+    assert load(tmp_path)["view"] == "neutral"
+    captured = capsys.readouterr()
+    assert captured.err == "路径图生成失败（ValueError），报告照常写\n"
+    assert "路径图：" not in captured.out and f"报告：{md}" in captured.out
+
+
+def test_cli_degraded_run_write_failure_restores_old_svg(monkeypatch, tmp_path):
+    """Degraded run whose json move fails: the old svg comes back with the old pair."""
+    paths, old = _previous_three(monkeypatch, tmp_path)
+    monkeypatch.setattr(strategy_pick_diagram, "render_svg", _boom)
+    _fail_replace_of(monkeypatch, ".json.tmp")
+    assert run(["ZZZQ"]) == 1
+    assert [p.read_bytes() for p in paths] == old
+    assert no_leftovers(tmp_path)
+
+
+def test_cli_diagram_error_first_run_writes_pair(monkeypatch, tmp_path):
+    install(monkeypatch, tmp_path)
+    monkeypatch.setattr(strategy_pick_diagram, "render_svg", _boom)
+    assert run(["ZZZQ"]) == 0
+    assert written(tmp_path) == sorted(p.name for p in outputs(tmp_path))
+
+
+@pytest.mark.parametrize("over,leaf", [(dict(load_history=history(volume=130_000.0)), "gate_fail"),
+                                       (dict(load_history=history(150)), "history_short")])
+def test_cli_gate_fail_and_history_short_write_svg(monkeypatch, tmp_path, over, leaf):
+    install(monkeypatch, tmp_path, **over)
+    assert run(["ZZZQ"]) == 0
+    md, _, svg = three(tmp_path)
+    doc = load(tmp_path)
+    assert doc["leaf_id"] == leaf
+    assert svg.read_bytes() == svg_bytes(doc)
+    assert "](2026-10-25-ZZZQ.svg)" in md.read_text(encoding="utf-8")
+
+
+def test_cli_dotted_ticker_svg_name_and_link(monkeypatch, tmp_path, capsys):
+    install(monkeypatch, tmp_path)
+    assert run(["ZZ.Q"]) == 0
+    md, _, svg = three(tmp_path, "ZZ.Q")
+    assert svg.name == "2026-10-25-ZZ.Q.svg" and svg.is_file()
+    images = [s for s in md.read_text(encoding="utf-8").split("\n") if s.startswith("![")]
+    assert len(images) == 1 and images[0].endswith("](2026-10-25-ZZ.Q.svg)")
+    assert f"路径图：{svg}" in capsys.readouterr().out
+
+
+@pytest.mark.data_source("demo")
+def test_cli_demo_mode_svg_in_demo_dir(monkeypatch, tmp_path):
+    install(monkeypatch, tmp_path)
+    assert run(["ZZZQ"]) == 0
+    demo = tmp_path / "demo"
+    assert written(tmp_path) == ["demo"]
+    md, js, svg = three(demo)
+    assert written(demo) == sorted([md.name, js.name, svg.name])
+    assert svg.read_bytes() == svg_bytes(load(demo), "Demo")
+    assert "数据源 Demo" in svg.read_text(encoding="utf-8")
+
+
+@pytest.mark.data_source("yahoo")
+def test_cli_yahoo_mode_svg_names_yahoo(monkeypatch, tmp_path):
+    install(monkeypatch, tmp_path)
+    assert run(["ZZZQ"]) == 0
+    _, _, svg = three(tmp_path)
+    assert svg.read_bytes() == svg_bytes(load(tmp_path), "Yahoo")
+    assert "数据源 Yahoo" in svg.read_text(encoding="utf-8")
+
+
+def test_cli_ibkr_mode_svg_has_no_source_label(monkeypatch, tmp_path):
+    install(monkeypatch, tmp_path)
+    assert run(["ZZZQ"]) == 0
+    assert "数据源" not in svg_of(tmp_path).read_text(encoding="utf-8")
+
+
+def test_cli_needs_view_and_gateway_down_write_no_svg(monkeypatch, tmp_path):
+    install(monkeypatch, tmp_path, read_thesis=thesis(status=None, found=False,
+                                                      has_overview=False, has_thesis=False))
+    assert run(["ZZZQ"]) == 3
+    assert written(tmp_path) == []
+    install(monkeypatch, tmp_path, option_snapshot=GatewayUnavailable("gateway not reachable"))
+    assert run(["ZZZQ"]) == 1
+    assert written(tmp_path) == []

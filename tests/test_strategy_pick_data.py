@@ -133,6 +133,34 @@ def test_atm_oi_uses_nearest_listed_strike_when_exact_missing(monkeypatch):
     assert D.atm_open_interest("ZZZQ", date(2026, 11, 20), 277.5) == 7370 + 1857
 
 
+def _chain(put_oi, call_oi, strikes=(90.0, 95.0, 100.0, 105.0, 110.0, 40.0)):
+    return type("Chain", (), {
+        "puts": pd.DataFrame({"strike": list(strikes), "openInterest": list(put_oi)}),
+        "calls": pd.DataFrame({"strike": list(strikes), "openInterest": list(call_oi)})})()
+
+
+def test_atm_oi_none_when_every_near_money_oi_is_zero(monkeypatch):
+    """Real AAPL/SPY/QQQ 2026-10-26 after the close: Yahoo OI 0 on every near-money strike (only a
+    few deep-ITM strikes kept a value). That is missing data, not a zero."""
+    use_ticker(monkeypatch, FakeTicker(chain=_chain([0] * 5 + [12], [0] * 5 + [7])))
+    assert D.atm_open_interest("ZZZQ", date(2026, 11, 20), 100.0) is None
+
+
+def test_atm_oi_none_when_near_money_oi_is_nan_or_zero(monkeypatch):
+    nan = float("nan")
+    use_ticker(monkeypatch, FakeTicker(chain=_chain([nan, 0, nan, 0, nan, nan],
+                                                    [0, nan, 0, nan, 0, nan])))
+    assert D.atm_open_interest("ZZZQ", date(2026, 11, 20), 100.0) is None
+
+
+def test_atm_oi_real_low_values_are_kept(monkeypatch):
+    """A thin name: non-zero OI near the money, but low. The value stands (the gate fails it)."""
+    use_ticker(monkeypatch, FakeTicker(chain=_chain([3, 0, 0, 25, 0, 0], [0, 4, 0, 0, 9, 0])))
+    assert D.atm_open_interest("ZZZQ", date(2026, 11, 20), 100.0) == 0
+    use_ticker(monkeypatch, FakeTicker(chain=_chain([3, 0, 60, 25, 0, 0], [0, 4, 40, 0, 9, 0])))
+    assert D.atm_open_interest("ZZZQ", date(2026, 11, 20), 100.0) == 100
+
+
 # ---- option snapshot ----
 
 STRIKES = [float(s) for s in range(80, 121)]

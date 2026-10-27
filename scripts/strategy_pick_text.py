@@ -26,6 +26,17 @@ STRATEGY_LABELS = {
     "wheel": "Wheel",
 }
 
+CLASS_ONLY_FLAG = "rank_by_class_only"
+FLAG_LABELS = {"far_otm": "远价外", "thin_premium": "权利金薄", "required_win_rate": "所需胜率高",
+               "want_shares_only": "只在真想接股时做", "premium_average": "权利金一般",
+               "earnings_before_expiry": "到期日须早于财报日", "ex_dividend": "除息日在窗口内",
+               "ltcg_reset": "持有期会被重置", "reduce_hint": "考虑减仓",
+               CLASS_ONLY_FLAG: "组合总值取不到，只按类别排序"}
+LEG_LABELS = {"short_put": "短 Put", "short_call": "短 Call", "long_call": "长 Call",
+              "long_put": "长 Put"}
+# Shown as a warning line instead: it is about the shares held, not about this pick.
+HIDDEN_FLAGS = frozenset({"reduce_hint"})
+
 # Page under wiki/options/strategies/ each not-chosen line links to. Non-option keys point at the
 # page whose lists carry the reason (holding -> covered call, event window -> cash-secured put).
 STRATEGY_PAGES = {
@@ -146,11 +157,14 @@ def _build_why_not() -> dict[tuple[str, str], str]:
 WHY_NOT = _build_why_not()
 
 NEEDS_VIEW_PROMPT = "{ticker} 没有可用论点，请告诉我你的看法：看好 / 中性 / 不看好"
+# One stderr line when the decision-path diagram fails; the report and data are still written.
+DIAGRAM_FAIL_TEXT = "路径图生成失败（{name}），报告照常写"
 
 WARN = {
     "market_cap_missing": "市值未取到，市值子项未检查",
     "stale_quotes": "流动性未验证（报价陈旧），盘中重跑",
     "stale_quotes_yahoo": "Yahoo 报价陈旧：ATM 买卖价差未知，流动性门槛未验证，开仓前盘中再确认",
+    "oi_missing": "持仓量未取到/全为 0，未验证",
     "no_expiry": "20–60 天内没有到期日，依赖到期日的检查跳过，IV 缺失",
     "class_conflict": "wiki 档位（{wiki}）与持仓类型列（{stock_type}）不一致，按 wiki",
     "class_unknown": "类别未知，按热门股处理；可用 --class 指定",

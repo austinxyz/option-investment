@@ -8,11 +8,15 @@ ZZZQ is invented. Hand arithmetic (section 10):
   92.56 x 100 / 200,000 = 0.04628 -> flag rounds to 0.05 (约 5%)
 """
 import json
+import re
 
 import pytest
 
+from golden_harness import GOLDEN_DIR
 from strategy_pick_cli_stubs import base_result
+import option_labels
 import strategy_pick_data as D
+from strategy_pick_diagram import diagram_alt
 import strategy_pick_render as render
 import strategy_pick_rules as rules
 
@@ -148,7 +152,53 @@ def test_markdown_base_example_numbers(monkeypatch, tmp_path):
 
 def test_render_markdown_matches_written_file(monkeypatch, tmp_path):
     doc, md = base_result(monkeypatch, tmp_path)
-    assert render.render_markdown(doc) == md
+    assert render.render_markdown(doc, diagram="2026-10-25-ZZZQ.svg") == md
+    image = f"![{diagram_alt(doc)}](2026-10-25-ZZZQ.svg)"
+    assert md.split("\n")[2] == image and "]" not in diagram_alt(doc)
+
+
+def _drop_image(md: str) -> str:
+    return re.sub(r"^!\[[^\]\n]*\]\([^)\n]+\.svg\)\n\n", "", md, flags=re.MULTILINE)
+
+
+def test_render_markdown_without_diagram_is_unchanged(monkeypatch, tmp_path):
+    doc, md = base_result(monkeypatch, tmp_path)
+    assert render.render_markdown(doc) == _drop_image(md) != md
+    # The IBKR golden of the base example: no diagram = the report as it was before the svg.
+    picks = GOLDEN_DIR / "strategy_pick_base" / "data" / "strategy-picks"
+    if not picks.is_dir():
+        pytest.skip("tests/golden/ ships only in the overlay repo")
+    gold_doc = json.loads((picks / "2026-10-23-ZZZQ.json").read_text(encoding="utf-8"))
+    gold_md = (picks / "2026-10-23-ZZZQ.md").read_bytes()
+    assert render.render_markdown(gold_doc).encode("utf-8") == _drop_image(
+        gold_md.decode("utf-8")).encode("utf-8")
+
+
+def _paragraphs(md: str) -> list[str]:
+    return md.split("\n\n")
+
+
+@pytest.mark.data_source("yahoo")
+def test_image_paragraph_after_banner_yahoo(monkeypatch, tmp_path):
+    doc, md = base_result(monkeypatch, tmp_path)
+    paras = _paragraphs(md)
+    assert paras[0].startswith("# ZZZQ 策略推荐")
+    assert paras[1] == option_labels.quality_banner()
+    assert paras[2] == f"![{diagram_alt(doc)}](2026-10-25-ZZZQ.svg)"
+    assert paras[3] == "## 结论与下一步"
+    assert render.render_markdown(doc, diagram="2026-10-25-ZZZQ.svg") == md
+
+
+def test_render_console_line_before_report(monkeypatch, tmp_path):
+    doc, _ = base_result(monkeypatch, tmp_path)
+    md_path, json_path, svg_path = tmp_path / "a.md", tmp_path / "a.json", tmp_path / "a.svg"
+    lines = render.render_console(doc, md_path, json_path, svg_path).split("\n")
+    at = lines.index(f"路径图：{svg_path}")
+    assert lines[at + 1] == f"报告：{md_path}"
+    assert sum(s.startswith("路径图：") for s in lines) == 1
+    plain = render.render_console(doc, md_path, json_path).split("\n")
+    assert [s for s in lines if not s.startswith("路径图：")] == plain
+    assert not any(s.startswith("路径图") for s in plain)
 
 
 def test_markdown_earnings_imminent_pair_is_readable(monkeypatch, tmp_path):

@@ -288,7 +288,7 @@ Wheel：卖现金担保 Put → 被指派拿到股票 → 对股票卖 Call → 
 ./.venv/Scripts/python.exe scripts/strategy_pick.py TICKER [--view 看好|中性|不看好] [--class bluechip|hot|etf]
 ```
 
-**只建议，不开仓。** 它不下单、不碰账本和 `data/positions.md`，只把报告写到私有的 `data/strategy-picks/<运行日期>-<TICKER>.md` 和同名 `.json`（gitignored，里面有持仓判定和论点看法）。研究用途，不构成投资建议。
+**只建议，不开仓。** 它不下单、不碰账本和 `data/positions.md`，只把报告写到私有的 `data/strategy-picks/<运行日期>-<TICKER>.md` 和同名 `.json`（gitignored，里面有持仓判定和论点看法）。报告顶部有本次的决策路径图（同名 `.svg`，高亮这次走过的路径，只在本地打开、不上传）。研究用途，不构成投资建议。
 
 - **七步**：流动性门槛 → 标的类别（蓝筹 / 热门股 / ETF）→ 你的看法（wiki 论点或 `--view`）→ 一年走势 → IV 位置 → 是否持有 → 输出（1–2 个策略；财报 / 除息按类别并入警告）。报告里每一步都列出输入值、阈值、阈值常量名和结果，阈值表由代码按本次实际用到的常量生成。
 - **看法**：来自 wiki 的 overview 状态和 thesis；`--view` 优先，两者不一致会写警告。没有可用论点时**退出码 3**：不写文件，由你说出看法（看好 / 中性 / 不看好），再带 `--view` 重跑，工具不替你选。

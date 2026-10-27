@@ -56,6 +56,8 @@ GATE_MAX_SPREAD_PCT = 0.10
 # Put + call OI at the ATM strike of the MONTHLY expiry in the 20-60d window (select_oi_expiry),
 # not of the weekly the spreads use: a 4-5 week weekly is thin even for SPY (2026-10-26: 730 vs
 # 6282 on the monthly). Names listing only monthlies are measured exactly as before.
+# Every near-money (GATE_STRIKE_RANGE_PCT) OI 0 / NaN = Yahoo has no OI (after hours), not a real
+# zero: the item is unchecked with a warning. Any non-zero value there is measured as usual.
 MIN_ATM_OI = 500
 
 # Expiry used for IV (6.2).

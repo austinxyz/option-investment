@@ -152,3 +152,13 @@ def test_why_not_sentences_only_cite_pages_that_say_it():
         assert "低 IV" in _unsuitable(page), page
     for page in ("cash-secured-put.md", "bull-put-credit-spread.md", "iron-condor.md"):
         assert "已知事件" in _unsuitable(page), page
+
+
+def test_command_doc_mentions_diagram_local_only():
+    text = _source(COMMAND_DOC)
+    for needle in ("路径图", "file:///", "不上传"):
+        assert needle in text, needle
+    assert "不发布" in text
+    # Artifact is only ever named in a prohibition, never as an instruction to publish.
+    for line in (s for s in text.splitlines() if "Artifact" in s):
+        assert "不要发布成 Artifact" in line, line

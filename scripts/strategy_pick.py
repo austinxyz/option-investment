@@ -8,12 +8,12 @@ Read-only (design docs/superpowers/specs/2026-10-25-strategy-pick-design.md, 6.1
 data is fetched first, the tree decides, and only then are data/strategy-picks/<run date>-<TICKER>
 .md and .json written. Exit codes: 0 files written (gate fail, bearish and short history
 included), 1 gateway or market-data failure (nothing written), 2 bad arguments, 3 no usable
-thesis, so the user must give a view (nothing written).
+thesis, so the user must give a view (nothing written). Each exit-0 run also writes the
+decision-path diagram <run date>-<TICKER>.svg beside them (strategy_pick_output).
 """
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 from dataclasses import dataclass
@@ -30,6 +30,7 @@ import strategy_pick_rules as R
 import strategy_pick_steps as S
 import strategy_pick_text as T
 from ibkr_session import SettingsError
+from strategy_pick_output import render_diagram, write_outputs
 from strategy_pick_regime import classify
 from strategy_pick_tree import (DecisionContext, GateInputs, NeedsView, decide, earnings_state,
                                 iv_position, judge_gate, normalize_view, resolve_class,
@@ -254,55 +255,6 @@ def facts(f: Fetched, run_date: date) -> render.RunFacts:
                            earnings, decision, tuple(dict.fromkeys(warnings)))
 
 
-# ---- write (only after everything above succeeded) ----
-
-def _write(path: Path, text: str) -> None:
-    path.write_bytes(text.encode("utf-8"))
-
-
-def _swap_in(pairs: list[tuple[Path, Path]]) -> None:
-    """Move each temp onto its target; on any failure put every previous file back.
-
-    Two renames can never be one atomic step, so the old pair is first moved aside to .bak and
-    restored if either new file fails to land: the reader sees the old pair or the new pair.
-    """
-    backups, placed = [], []
-    try:
-        for _, target in pairs:
-            if target.exists():
-                bak = target.with_name(target.name + ".bak")
-                os.replace(target, bak)
-                backups.append((bak, target))
-        for tmp, target in pairs:
-            os.replace(tmp, target)
-            placed.append(target)
-    except OSError:
-        for target in placed:
-            target.unlink(missing_ok=True)
-        for bak, target in backups:
-            os.replace(bak, target)
-        raise
-    for bak, _ in backups:
-        bak.unlink(missing_ok=True)
-
-
-def write_outputs(result: dict, out_dir: Path) -> tuple[Path, Path]:
-    """md first, then json; temp files, so a failed write leaves the previous pair (or nothing)."""
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"{result['run_date']}-{result['ticker']}"
-    md_path, json_path = out_dir / (stem + ".md"), out_dir / (stem + ".json")
-    md_tmp, json_tmp = out_dir / (stem + ".md.tmp"), out_dir / (stem + ".json.tmp")
-    try:
-        _write(md_tmp, render.render_markdown(result))
-        _write(json_tmp, render.render_json(result))
-        _swap_in([(md_tmp, md_path), (json_tmp, json_path)])
-    finally:
-        md_tmp.unlink(missing_ok=True)
-        json_tmp.unlink(missing_ok=True)
-    return md_path, json_path
-
-
 # ---- main ----
 
 DEMO_OUTPUT_SUBDIR = "demo"
@@ -361,11 +313,14 @@ def main(argv: list[str] | None = None, today: date | None = None) -> int:
     except (D.MarketDataError, SettingsError, spread_data.DataError) as exc:
         return _fail(str(exc))
     result = render.build_result(facts(fetched, run_date))
+    diagram = render_diagram(result)
     try:
-        md_path, json_path = write_outputs(result, _output_dir())
+        md_path, json_path, svg_path = write_outputs(result, _output_dir(), diagram)
     except OSError as exc:
         return _fail(f"写报告失败：{exc}")
-    print(render.render_console(result, md_path, json_path))
+    if diagram.error is not None:
+        print(T.DIAGRAM_FAIL_TEXT.format(name=diagram.error), file=sys.stderr)
+    print(render.render_console(result, md_path, json_path, svg_path))
     return R.EXIT_OK
 
 
