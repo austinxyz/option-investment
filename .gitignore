@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 私有数据：账本、报告、设置、观察名单都在 data/ 下，不提交
+data/
+# /strategy-pick 的报告（已被 data/ 覆盖；单列一行，测试会检查）
+data/strategy-picks/
+
+# 密钥与本机设置
+.env
+*.env
+.claude/settings.local.json
+
+# 自己 status 时在本地生成的模拟盘页
+wiki/options/paper-trading.md
+
+# 系统文件
+.DS_Store
+Thumbs.db
