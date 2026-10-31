@@ -362,3 +362,117 @@ def test_evaluate_ticker_all_greekless_rejects_no_iv():
         _row(), snapshot=SNAP, spot=100.0, ma50=95.0, ma200=90.0, expirations=[NOV_MONTHLY],
         earnings_for=lambda e: "no", puts_for=lambda e: chain)
     assert got.reason == rules.REASON_NO_IV
+
+
+# --- --delta target: argument type, walk floor, target-aware pick_put ---------------------------
+import argparse
+import re
+from pathlib import Path
+
+WIDE_STRIKES = [float(k) for k in range(70, 100, 2)]
+
+
+@pytest.mark.parametrize("text,value", [("0.15", 0.15), ("0.2", 0.2), ("0.05", 0.05), ("0.40", 0.4)])
+def test_delta_arg_accepts(text, value):
+    assert rules.delta_arg(text) == value
+
+
+@pytest.mark.parametrize("text", ["abc", "", "nan", "inf", "-0.1", "0", "0.04", "0.41", "0.5", "0.125"])
+def test_delta_arg_rejects(text):
+    with pytest.raises(argparse.ArgumentTypeError) as exc:
+        rules.delta_arg(text)
+    assert str(exc.value) == rules.DELTA_ARG_ERROR
+
+
+def test_delta_arg_error_text_is_fixed():
+    assert rules.DELTA_ARG_ERROR == "--delta 须是 0.05–0.40 之间、最多两位小数的数，例如 0.15（短腿 Delta 越小越价外）"
+
+
+@pytest.mark.parametrize("target,floor", [(0.20, 0.10), (0.15, 0.10), (0.10, 0.10), (0.05, 0.05), (0.30, 0.10)])
+def test_walk_floor_table(target, floor):
+    assert rules.walk_floor(target) == floor
+
+
+def test_is_default_delta():
+    assert rules.is_default_delta(0.2) and rules.is_default_delta(0.20)
+    assert not rules.is_default_delta(0.15)
+
+
+def _nearest(target, strikes=STRIKES):
+    return min(strikes, key=lambda k: abs(core.put_delta(100.0, k, 0.35, 37) - target))
+
+
+def test_pick_put_target_015_starts_nearest_015():
+    chain = make_chain(spot=100.0, iv=0.35, days=37, strikes=STRIKES, quote_spread=0.01)
+    quote, delta, warnings = rules.pick_put(chain, 100.0, 37, target_delta=0.15)
+    assert quote["strike"] == _nearest(0.15)
+    assert not any("已偏离" in w for w in warnings)
+
+
+def _wide_below(chain, floor):
+    """Wide everywhere a walk may stand (Delta >= floor); tight only beyond the floor."""
+    return [dict(r, bid=0.10, ask=0.40) if core.put_delta(100.0, r["strike"], 0.35, 37) >= floor
+            else r for r in chain]
+
+
+def test_pick_put_walks_to_floor_not_below():
+    chain = make_chain(spot=100.0, iv=0.35, days=37, strikes=WIDE_STRIKES, quote_spread=0.01)
+    assert rules.pick_put(_wide_below(chain, 0.10), 100.0, 37,
+                          target_delta=0.15) == rules.REASON_WIDE
+
+
+def test_pick_put_target_010_never_walks():
+    chain = make_chain(spot=100.0, iv=0.35, days=37, strikes=STRIKES, quote_spread=0.01)
+    best = _nearest(0.10)
+    got = rules.pick_put(_wide_at(chain, {best}), 100.0, 37, target_delta=0.10)
+    assert got == rules.REASON_WIDE
+
+
+def test_pick_put_target_005_floor_equals_target():
+    chain = make_chain(spot=100.0, iv=0.35, days=37, strikes=STRIKES, quote_spread=0.01)
+    best = _nearest(0.05)
+    got = rules.pick_put(_wide_at(chain, {best}), 100.0, 37, target_delta=0.05)
+    assert got == rules.REASON_WIDE
+
+
+def test_pick_put_target_040_gap_reject_text():
+    got = rules.pick_put(_single_row(0.30), 100.0, 33, target_delta=0.40)
+    assert isinstance(got, str) and got.startswith(rules.REASON_DELTA_GAP)
+    assert "最接近 0.40 的行权价" in got
+
+
+def test_pick_put_drift_warning_uses_target():
+    chain = make_chain(spot=100.0, iv=0.35, days=37, strikes=STRIKES, quote_spread=0.01)
+    first = _nearest(0.15)
+    _, _, warnings = rules.pick_put(_wide_at(chain, {first}), 100.0, 37, target_delta=0.15)
+    assert any(w.endswith("已偏离 0.15") for w in warnings)
+
+
+def test_pick_put_default_texts_unchanged():
+    chain = make_chain(spot=100.0, iv=0.35, days=37, strikes=STRIKES, quote_spread=0.01)
+    wide = _wide_at(chain, {rules.pick_put(chain, 100.0, 37)[0]["strike"]})
+    plain = rules.pick_put(wide, 100.0, 37)
+    assert plain == rules.pick_put(wide, 100.0, 37, target_delta=0.2)
+    assert any(w.endswith("已偏离 0.20") for w in plain[2])
+    gap = rules.pick_put(_single_row(0.30), 100.0, 33)
+    assert gap == rules.pick_put(_single_row(0.30), 100.0, 33, target_delta=0.2)
+    assert "最接近 0.20 的行权价" in gap
+
+
+def test_candidate_target_key_only_when_non_default():
+    def run(**kw):
+        chain = make_chain(100.0, 0.35, 33, STRIKES, quote_spread=0.01)
+        return rules.evaluate_ticker(
+            _row(), snapshot=SNAP, spot=100.0, ma50=95.0, ma200=90.0, expirations=[NOV_MONTHLY],
+            earnings_for=lambda e: "no", puts_for=lambda e: chain, **kw)
+    assert "target_delta" not in run()
+    assert "target_delta" not in run(target_delta=0.2)
+    assert run(target_delta=0.15)["target_delta"] == 0.15
+
+
+def test_no_new_delta_literals_in_rules():
+    """The new thresholds live on constant lines only (the plan's Global Constraints)."""
+    src = (Path(rules.__file__)).read_text(encoding="utf-8").splitlines()
+    loose = [ln for ln in src if not re.match(r"[A-Z_]+ = ", ln)
+             and re.search(r"0\.05|0\.40|0\.15", ln)]
+    assert loose == []

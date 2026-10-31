@@ -558,3 +558,89 @@ def test_open_save_keeps_broker_block_written_meanwhile(env, monkeypatch):
     spreads = spread_ledger.load(path)["spreads"]
     assert len(spreads) == 2
     assert spreads[0]["broker"] == {"status": "submitted", "order_ref": "rwh-1-LIVE0001"}
+
+
+# --- --delta target -------------------------------------------------------------------------------
+import put_screen_rules
+
+BAD_DELTAS = ["abc", "", "nan", "inf", "-0.1", "0", "0.04", "0.41", "0.5", "0.125"]
+MONTHLY_EXPIRY = "2026-11-20"  # 35 days after SNAP
+
+
+def _collect(env):
+    root = env["ledger"]
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def _monthly(env, monkeypatch):
+    monkeypatch.setattr(spread_data, "expirations", lambda t: [MONTHLY_EXPIRY])
+    monkeypatch.setattr(spread_data, "fetch_calls",
+                        lambda t, e: make_call_chain(spot=100.0, days=35, iv=0.40, quote_spread=0.01))
+
+
+def _run_collect(env, capsys, *args):
+    capsys.readouterr()
+    assert run(env, "suggest", *args) == 0
+    return _collect(env), capsys.readouterr().out
+
+
+@pytest.mark.parametrize("bad", BAD_DELTAS)
+def test_cli_delta_bad_exit_2_writes_nothing(env, capsys, bad):
+    with pytest.raises(SystemExit) as exc:
+        run(env, "suggest", "--delta", bad)
+    assert exc.value.code == 2
+    assert "--delta 须是 0.05–0.40 之间、最多两位小数的数" in capsys.readouterr().err
+    assert not env["ledger"].exists()
+
+
+@pytest.mark.parametrize("dte", [(), ("--dte", "monthly")])
+def test_cli_delta_default_byte_identical(env, capsys, monkeypatch, dte):
+    if dte:
+        _monthly(env, monkeypatch)
+    base = _run_collect(env, capsys, *dte)
+    assert _run_collect(env, capsys, *dte, "--delta", "0.20") == base
+    assert _run_collect(env, capsys, *dte, "--delta", "0.2") == base
+    assert b"target_delta" not in base[0][f"suggestions/{SNAP}-AAA-call-real.json"]
+
+
+def test_cli_delta_015_rules_line_and_json(env, capsys, monkeypatch):
+    _monthly(env, monkeypatch)
+    files, out = _run_collect(env, capsys, "--dte", "monthly")
+    files15, out15 = _run_collect(env, capsys, "--dte", "monthly", "--delta", "0.15")
+    line = "Delta 0.15（虚值，--delta，价差过宽时往外最多到 0.10）"
+    for name in (f"call-screen/{SNAP}.md", f"suggestions/{SNAP}-AAA-call-real.md"):
+        assert line in files15[name].decode("utf-8")
+        assert "Delta 0.20（虚值）" in files[name].decode("utf-8")
+    assert read_json(env["ledger"] / "call-screen" / f"{SNAP}.json")["rules"]["target_delta"] == 0.15
+    assert read_json(sug(env, f"{SNAP}-AAA-call-real.json"))["target_delta"] == 0.15
+    assert out15.splitlines() == out.splitlines()
+
+
+def test_open_records_and_validates_target_delta(env):
+    assert run(env, "suggest", "--delta", "0.15") == 0
+    assert run(env, "open", "AAA") == 0
+    assert ledger(env)["spreads"][0]["delta_target"] == 0.15
+
+
+def test_open_legacy_candidate_records_default(env):
+    assert run(env, "suggest") == 0
+    assert run(env, "open", "AAA") == 0
+    assert ledger(env)["spreads"][0]["delta_target"] == 0.2
+
+
+@pytest.mark.parametrize("bad", ["0.15", -0.1, 0.9, None, True])
+def test_open_rejects_damaged_target_delta(env, capsys, bad):
+    assert run(env, "suggest") == 0
+    path = sug(env, f"{SNAP}-AAA-call-real.json")
+    doc = read_json(path)
+    doc["target_delta"] = bad
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    assert run(env, "open", "AAA") == 1
+    assert "suggest" in capsys.readouterr().err
+    assert not (env["ledger"] / "spreads.json").exists()
+
+
+def test_call_cli_shares_delta_arg():
+    sub = next(a for a in call_screen.build_parser()._actions if a.dest == "cmd")
+    delta = next(a for a in sub.choices["suggest"]._actions if a.dest == "delta")
+    assert delta.type is put_screen_rules.delta_arg is call_screen.rules.delta_arg

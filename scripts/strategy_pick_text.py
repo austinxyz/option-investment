@@ -73,10 +73,10 @@ NEXT_COMMANDS = {
 }
 
 NEXT_COMMAND_CAVEATS = {
-    "cash_secured_put": ("它扫整个 wiki，不接 ticker；要求收盘价在 MA200 之上、到期前无财报、"
-                         "只取 Delta 0.20（往下最多走到 0.10），远价外和下行的情形它可能不出这只票"),
+    "cash_secured_put": ("加 --tickers 只筛这一只（不再读 wiki 的 Avoid / 复核中状态）；"
+                         "仍要求收盘价在 MA200 之上、到期前无财报，远价外和下行的情形它可能剔掉这只票"),
     "bull_put_spread": "三档 0.20 / 0.15 / 0.10，远价外选 0.10 或 0.15 档",
-    "covered_call": "扫全部持股，只取 Delta 0.20；远价外 0.10–0.15 需要自己往外挑",
+    "covered_call": "扫全部持股，不接 ticker；Delta 用 --delta 指定（见上一节），不指定就是 0.20",
     "collar": "扫全部持股，按 90% / 85% / 80% 现价选 Put、Call 取零成本，具体档由它定",
     "protective_put": "扫全部持股，按 90% / 85% / 80% 现价选 Put，具体档由它定",
     "reduce_position": "减仓走 /stock-review、/stock-exit，本工具不下单",

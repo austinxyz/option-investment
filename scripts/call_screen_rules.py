@@ -12,9 +12,10 @@ import spread_core as core
 import spread_data
 from holdings import HeldLot
 from put_screen_rules import (
-    MAX_SPREAD_PCT, MAX_WALK_STEPS, MIN_DELTA, REASON_DELTA_GAP, REASON_NO_IV,
+    MAX_SPREAD_PCT, MAX_WALK_STEPS, REASON_DELTA_GAP, REASON_NO_IV,
     REASON_NO_MONTHLY, REASON_NO_WEEKLY, REASON_WIDE, TARGET_DELTA, Reject,
-    pick_monthly_expiry, pick_weekly_expiry, spread_warnings)
+    DELTA_ARG_MAX, DELTA_ARG_MIN, delta_arg, is_default_delta, pick_monthly_expiry,
+    pick_weekly_expiry, spread_warnings, walk_floor)
 
 REASON_SHORT_SHARES = "股数不足 100 股"
 REASON_COVERED = "已被未平仓 call 覆盖"
@@ -23,8 +24,9 @@ REASON_COST_UNKNOWN = "成本未知"
 
 def pick_call(calls: list[dict], spot: float, days: float, *,
               spread_limit: float = MAX_SPREAD_PCT,
-              spread_warn: float | None = None) -> tuple[dict, float, list[str]] | str:
-    """Strike above spot with Delta nearest 0.20; walk up if the spread is wide.
+              spread_warn: float | None = None,
+              target_delta: float = TARGET_DELTA) -> tuple[dict, float, list[str]] | str:
+    """Strike above spot with Delta nearest the target; walk up if the spread is wide.
 
     Returns (quote, delta, warnings) or a reject-reason string.
     """
@@ -35,16 +37,17 @@ def pick_call(calls: list[dict], spot: float, days: float, *,
         key=lambda qdw: qdw[0]["strike"])
     if not otm:
         return REASON_NO_IV
-    start = min(range(len(otm)), key=lambda i: abs(otm[i][1] - TARGET_DELTA))
-    if abs(otm[start][1] - TARGET_DELTA) > core.MAX_DELTA_GAP:
-        return (f"{REASON_DELTA_GAP}：最接近 0.20 的行权价 {otm[start][0]['strike']:g} "
+    start = min(range(len(otm)), key=lambda i: abs(otm[i][1] - target_delta))
+    if abs(otm[start][1] - target_delta) > core.MAX_DELTA_GAP:
+        return (f"{REASON_DELTA_GAP}：最接近 {target_delta:.2f} 的行权价 {otm[start][0]['strike']:g} "
                 f"Delta {otm[start][1]:.2f}（IV 不可靠或行权价间距过粗）")
+    floor = walk_floor(target_delta)
     for step in range(MAX_WALK_STEPS + 1):
         idx = start + step
         if idx >= len(otm):
             break
         quote, delta, cross = otm[idx]
-        if step > 0 and delta < MIN_DELTA:
+        if step > 0 and delta < floor:
             break
         warnings: list[str] = []
         if quote["spread_pct"] is None:
@@ -54,7 +57,7 @@ def pick_call(calls: list[dict], spot: float, days: float, *,
         else:
             warnings.extend(spread_warnings(quote["spread_pct"], spread_limit, spread_warn))
         if step > 0:
-            warnings.append(f"实际 Delta {delta:.2f}，已偏离 0.20")
+            warnings.append(f"实际 Delta {delta:.2f}，已偏离 {target_delta:.2f}")
         if cross:
             warnings.append(cross)
         return quote, delta, warnings
@@ -106,13 +109,43 @@ def _precheck(lot: HeldLot, available: int) -> str | None:
     return REASON_COST_UNKNOWN if lot.cost_basis <= 0 else None
 
 
+def _lot_record(lot: HeldLot, quote: dict, delta: float, base: list[str], *, snapshot: date,
+                spot: float, ma50: float | None, ma200: float | None, month_return: float | None,
+                available: int, expiry: str, days: int, in_window: bool, dte_mode: str,
+                earnings: str, ex_div: date | None, target_delta: float) -> dict:
+    """The candidate record for a lot whose call was picked (no data access)."""
+    strike, mid = quote["strike"], quote["mid"]
+    record = {
+        "ticker": lot.ticker, "source": lot.source, "lot_id": lot.lot_id, "label": lot.label,
+        "shares": lot.shares, "contracts_available": available,
+        "cost_basis": lot.cost_basis, "original_cost": lot.original_cost,
+        "reference_price": lot.reference_price, "cost_estimated": lot.cost_estimated,
+        "accounts": lot.accounts, "snapshot_date": snapshot.isoformat(), "spot": spot,
+        "ma50_pct": _pct_vs(spot, ma50), "ma200_pct": _pct_vs(spot, ma200),
+        "month_return_pct": month_return,
+        "expiry": expiry, "days": days, "in_window": in_window, "dte_mode": dte_mode,
+        "strike": strike, "mid": mid, "stale": quote["stale"],
+        "spread_pct": quote["spread_pct"], "delta": delta, "iv": quote["iv"],
+        "earnings": earnings, "ex_dividend": ex_div.isoformat() if ex_div else None,
+        "premium_per_contract": mid * 100,
+        "upside_to_strike_pct": (strike - spot) / spot * 100,
+        "annualized_pct": mid / spot * 365 / days * 100,
+        "warnings": _lot_warnings(lot, base, strike=strike, mid=mid, earnings=earnings,
+                                  ex_div=ex_div, in_window=in_window),
+    }
+    if not is_default_delta(target_delta):  # absent key = built-in target, so old files stay valid
+        record["target_delta"] = round(target_delta, 2)
+    return record
+
+
 def evaluate_lot(lot: HeldLot, *, snapshot: date, spot: float, ma50: float | None,
                  ma200: float | None, month_return: float | None, contracts_available: int,
                  expirations: list[str], earnings_for: Callable[[str], str],
                  ex_div_for: Callable[[str], date | None],
                  calls_for: Callable[[str], list[dict]],
                  dte_mode: str = "weekly", spread_limit: float = MAX_SPREAD_PCT,
-                 spread_warn: float | None = None) -> dict | Reject:
+                 spread_warn: float | None = None,
+                 target_delta: float = TARGET_DELTA) -> dict | Reject:
     early = _precheck(lot, contracts_available)
     if early:
         return Reject(lot.label, early)
@@ -132,27 +165,11 @@ def evaluate_lot(lot: HeldLot, *, snapshot: date, spot: float, ma50: float | Non
         return Reject(lot.label, "取不到期权链")
     days = (date.fromisoformat(expiry) - snapshot).days
     picked = pick_call(calls, spot, days, spread_limit=spread_limit,
-                       spread_warn=spread_warn)
+                       spread_warn=spread_warn, target_delta=target_delta)
     if isinstance(picked, str):
         return Reject(lot.label, picked)
     quote, delta, base = picked
-    ex_div = ex_div_for(expiry)
-    strike, mid = quote["strike"], quote["mid"]
-    return {
-        "ticker": lot.ticker, "source": lot.source, "lot_id": lot.lot_id, "label": lot.label,
-        "shares": lot.shares, "contracts_available": contracts_available,
-        "cost_basis": lot.cost_basis, "original_cost": lot.original_cost,
-        "reference_price": lot.reference_price, "cost_estimated": lot.cost_estimated,
-        "accounts": lot.accounts, "snapshot_date": snapshot.isoformat(), "spot": spot,
-        "ma50_pct": _pct_vs(spot, ma50), "ma200_pct": _pct_vs(spot, ma200),
-        "month_return_pct": month_return,
-        "expiry": expiry, "days": days, "in_window": in_window, "dte_mode": dte_mode,
-        "strike": strike, "mid": mid, "stale": quote["stale"],
-        "spread_pct": quote["spread_pct"], "delta": delta, "iv": quote["iv"],
-        "earnings": earnings, "ex_dividend": ex_div.isoformat() if ex_div else None,
-        "premium_per_contract": mid * 100,
-        "upside_to_strike_pct": (strike - spot) / spot * 100,
-        "annualized_pct": mid / spot * 365 / days * 100,
-        "warnings": _lot_warnings(lot, base, strike=strike, mid=mid, earnings=earnings,
-                                  ex_div=ex_div, in_window=in_window),
-    }
+    return _lot_record(lot, quote, delta, base, snapshot=snapshot, spot=spot, ma50=ma50,
+                       ma200=ma200, month_return=month_return, available=contracts_available,
+                       expiry=expiry, days=days, in_window=in_window, dte_mode=dte_mode,
+                       earnings=earnings, ex_div=ex_div_for(expiry), target_delta=target_delta)

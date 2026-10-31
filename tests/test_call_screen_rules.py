@@ -239,3 +239,87 @@ def test_pick_call_skips_greekless_strike():
     holed = [dict(r, iv=None, delta=None) if r["strike"] == first else r for r in chain]
     got = rules.pick_call(holed, 100.0, 13)
     assert not isinstance(got, str) and got[0]["strike"] != first
+
+
+# --- --delta target: shared constants, walk-up floor, target-aware texts -------------------------
+import re
+from pathlib import Path
+
+WIDE_UP = [float(k) for k in range(101, 160, 2)]
+
+
+def _call_delta(strike):
+    return core.call_delta(100.0, strike, 0.35, 13)
+
+
+def _wide_from(chain, floor):
+    """Wide everywhere a walk may stand (Delta >= floor); tight only beyond the floor."""
+    return [dict(r, bid=0.10, ask=0.40) if _call_delta(r["strike"]) >= floor else r for r in chain]
+
+
+def _chain():
+    return make_call_chain(spot=100.0, iv=0.35, days=13, strikes=WIDE_UP, quote_spread=0.01)
+
+
+def test_call_rules_import_shared_constants():
+    assert rules.walk_floor is put_rules.walk_floor
+    assert rules.is_default_delta is put_rules.is_default_delta
+
+
+def test_pick_call_target_015_starts_nearest_015():
+    quote, _, warnings = rules.pick_call(_chain(), 100.0, 13, target_delta=0.15)
+    best = min(WIDE_UP, key=lambda k: abs(_call_delta(k) - 0.15))
+    assert quote["strike"] == best
+    assert not any("已偏离" in w for w in warnings)
+
+
+def test_pick_call_walks_up_strike_not_below_floor():
+    chain = _chain()
+    first = rules.pick_call(chain, 100.0, 13, target_delta=0.15)[0]["strike"]
+    stuck = _wide_from(chain, 0.10)
+    assert rules.pick_call(stuck, 100.0, 13, target_delta=0.15) == put_rules.REASON_WIDE
+    one_wide = _wide_at(chain, {first})
+    quote, delta, _ = rules.pick_call(one_wide, 100.0, 13, target_delta=0.15)
+    assert quote["strike"] > first and delta >= 0.10
+
+
+def test_pick_call_target_010_never_walks():
+    chain = _chain()
+    best = min(WIDE_UP, key=lambda k: abs(_call_delta(k) - 0.10))
+    assert rules.pick_call(_wide_at(chain, {best}), 100.0, 13,
+                           target_delta=0.10) == put_rules.REASON_WIDE
+
+
+def test_pick_call_gap_and_drift_text_use_target():
+    far = make_call_chain(spot=100.0, iv=0.25, days=13, strikes=[float(k) for k in range(140, 151)])
+    gap = rules.pick_call(far, 100.0, 13, target_delta=0.15)
+    assert isinstance(gap, str) and "最接近 0.15 的行权价" in gap
+    chain = _chain()
+    first = rules.pick_call(chain, 100.0, 13, target_delta=0.15)[0]["strike"]
+    _, _, warnings = rules.pick_call(_wide_at(chain, {first}), 100.0, 13, target_delta=0.15)
+    assert any(w.endswith("已偏离 0.15") for w in warnings)
+
+
+def test_pick_call_default_texts_unchanged():
+    chain = make_call_chain(spot=100.0, iv=0.35, days=13, strikes=STRIKES, quote_spread=0.02)
+    first = rules.pick_call(chain, 100.0, 13)[0]["strike"]
+    wide = _wide_at(chain, {first})
+    plain = rules.pick_call(wide, 100.0, 13)
+    assert plain == rules.pick_call(wide, 100.0, 13, target_delta=0.2)
+    assert any(w.endswith("已偏离 0.20") for w in plain[2])
+    far = make_call_chain(spot=100.0, iv=0.25, days=13, strikes=[float(k) for k in range(140, 151)])
+    assert "最接近 0.20 的行权价" in rules.pick_call(far, 100.0, 13)
+
+
+def test_candidate_target_key_only_when_non_default():
+    chain = _chain()
+    assert "target_delta" not in _eval(chain=chain)
+    assert "target_delta" not in _eval(chain=chain, target_delta=0.2)
+    assert _eval(chain=chain, target_delta=0.15)["target_delta"] == 0.15
+
+
+def test_no_new_delta_literals_in_call_rules():
+    src = Path(rules.__file__).read_text(encoding="utf-8").splitlines()
+    loose = [ln for ln in src if not re.match(r"[A-Z_]+ = ", ln)
+             and re.search(r"0\.05|0\.40|0\.15|0\.10", ln)]
+    assert loose == []

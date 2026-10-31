@@ -6,6 +6,8 @@ per-ticker candidate/reject decision. See
 docs/superpowers/specs/2026-10-18-put-screen-design.md.
 """
 from __future__ import annotations
+import argparse
+import math
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Callable
@@ -17,6 +19,12 @@ from put_screen_wiki import UniverseRow
 LEVERAGED_ETFS = frozenset({"TSLL"})
 TARGET_DELTA = 0.20
 MIN_DELTA = 0.10
+# `--delta` bounds: above the cap a short leg is near the money (not what this screen is for);
+# below the floor MAX_DELTA_GAP stops meaning anything and the premium is too thin to bother.
+DELTA_ARG_MIN = 0.05
+DELTA_ARG_MAX = 0.40
+DELTA_ARG_ERROR = "--delta 须是 0.05–0.40 之间、最多两位小数的数，例如 0.15（短腿 Delta 越小越价外）"
+DELTA_RULE_NOTE = "--delta，价差过宽时往外最多到 {floor:.2f}"
 MAX_SPREAD_PCT = 0.05
 # Yahoo/demo mode: option_settings.PROFILES carries the relaxed hard line and the warn line; the rule
 # functions only receive them as `spread_limit` / `spread_warn` (defaults = IBKR, byte-identical).
@@ -33,6 +41,32 @@ REASON_NO_IV = "IV 缺失"
 REASON_DELTA_GAP = "Delta 偏离目标过大"
 REASON_NO_WEEKLY = "没有可用的周度到期"
 REASON_NO_MONTHLY = "没有可用的月度到期"
+
+
+def delta_arg(text: str) -> float:
+    """argparse `type=` for --delta: a finite number in range with at most two decimals.
+
+    Anything else is refused, never rounded or clamped: 0.125 or 0.5 silently becoming another
+    number would change which strike gets sold.
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(DELTA_ARG_ERROR) from None
+    in_range = math.isfinite(value) and DELTA_ARG_MIN <= value <= DELTA_ARG_MAX
+    if not in_range or abs(value * 100 - round(value * 100)) >= 1e-9:
+        raise argparse.ArgumentTypeError(DELTA_ARG_ERROR)
+    return round(value, 2)
+
+
+def walk_floor(target: float) -> float:
+    """Lowest Delta the spread walk-down may reach; a target at or under MIN_DELTA never walks."""
+    return min(MIN_DELTA, target)
+
+
+def is_default_delta(target: float) -> bool:
+    """True for the built-in target, however spelled: output stays byte-identical for it."""
+    return round(target, 2) == TARGET_DELTA
 
 
 @dataclass(frozen=True)
@@ -90,8 +124,9 @@ def pick_weekly_expiry(expirations: list[str], snapshot: date) -> tuple[str, boo
 
 def pick_put(puts: list[dict], spot: float, days: float, *,
              spread_limit: float = MAX_SPREAD_PCT,
-             spread_warn: float | None = None) -> tuple[dict, float, list[str]] | str:
-    """Strike with Delta nearest 0.20; walk down to a lower strike if the spread is wide.
+             spread_warn: float | None = None,
+             target_delta: float = TARGET_DELTA) -> tuple[dict, float, list[str]] | str:
+    """Strike with Delta nearest the target; walk down to a lower strike if the spread is wide.
 
     Returns (quote, delta, warnings) or a reject-reason string.
     """
@@ -102,16 +137,17 @@ def pick_put(puts: list[dict], spot: float, days: float, *,
         key=lambda qdw: -qdw[0]["strike"])
     if not otm:
         return REASON_NO_IV
-    start = min(range(len(otm)), key=lambda i: abs(otm[i][1] - TARGET_DELTA))
-    if abs(otm[start][1] - TARGET_DELTA) > core.MAX_DELTA_GAP:
-        return (f"{REASON_DELTA_GAP}：最接近 0.20 的行权价 {otm[start][0]['strike']:g} "
+    start = min(range(len(otm)), key=lambda i: abs(otm[i][1] - target_delta))
+    if abs(otm[start][1] - target_delta) > core.MAX_DELTA_GAP:
+        return (f"{REASON_DELTA_GAP}：最接近 {target_delta:.2f} 的行权价 {otm[start][0]['strike']:g} "
                 f"Delta {otm[start][1]:.2f}（IV 不可靠或行权价间距过粗）")
+    floor = walk_floor(target_delta)
     for step in range(MAX_WALK_STEPS + 1):
         idx = start + step
         if idx >= len(otm):
             break
         quote, delta, cross = otm[idx]
-        if step > 0 and delta < MIN_DELTA:
+        if step > 0 and delta < floor:
             break
         warnings: list[str] = []
         if quote["spread_pct"] is None:
@@ -121,7 +157,7 @@ def pick_put(puts: list[dict], spot: float, days: float, *,
         else:
             warnings.extend(spread_warnings(quote["spread_pct"], spread_limit, spread_warn))
         if step > 0:
-            warnings.append(f"实际 Delta {delta:.2f}，已偏离 0.20")
+            warnings.append(f"实际 Delta {delta:.2f}，已偏离 {target_delta:.2f}")
         if cross:
             warnings.append(cross)
         return quote, delta, warnings
@@ -150,7 +186,7 @@ def _screen_reject(row: UniverseRow, spot: float, ma200: float) -> str | None:
 
 def _candidate(row: UniverseRow, picked: tuple[dict, float, list[str]], *, snapshot: date,
                spot: float, ma50: float, expiry: str, days: int, in_window: bool,
-               dte_mode: str, earnings: str) -> dict:
+               dte_mode: str, earnings: str, target_delta: float) -> dict:
     """The candidate record for a ticker whose put was picked (no data access)."""
     quote, delta, put_warnings = picked
     warnings = list(put_warnings)
@@ -164,7 +200,7 @@ def _candidate(row: UniverseRow, picked: tuple[dict, float, list[str]], *, snaps
         warnings.append("到期日在偏好窗口之外")
     warnings.extend(row.notes)
     strike, mid = quote["strike"], quote["mid"]
-    return {
+    record = {
         "ticker": row.ticker, "tier": row.tier, "status": row.status,
         "snapshot_date": snapshot.isoformat(), "spot": spot,
         "expiry": expiry, "days": days, "in_window": in_window, "dte_mode": dte_mode,
@@ -178,6 +214,9 @@ def _candidate(row: UniverseRow, picked: tuple[dict, float, list[str]], *, snaps
         "max_loss_assigned": (strike - mid) * 100,
         "warnings": warnings,
     }
+    if not is_default_delta(target_delta):  # absent key = built-in target, so old files stay valid
+        record["target_delta"] = round(target_delta, 2)
+    return record
 
 
 def evaluate_ticker(row: UniverseRow, *, snapshot: date, spot: float, ma50: float,
@@ -185,7 +224,8 @@ def evaluate_ticker(row: UniverseRow, *, snapshot: date, spot: float, ma50: floa
                     earnings_for: Callable[[str], str],
                     puts_for: Callable[[str], list[dict]],
                     dte_mode: str = "monthly", spread_limit: float = MAX_SPREAD_PCT,
-                    spread_warn: float | None = None) -> dict | Reject:
+                    spread_warn: float | None = None,
+                    target_delta: float = TARGET_DELTA) -> dict | Reject:
     reason = _screen_reject(row, spot, ma200)
     if reason:
         return Reject(row.ticker, reason)
@@ -205,8 +245,9 @@ def evaluate_ticker(row: UniverseRow, *, snapshot: date, spot: float, ma50: floa
         return Reject(row.ticker, "取不到期权链")
     days = (date.fromisoformat(expiry) - snapshot).days
     picked = pick_put(puts, spot, days, spread_limit=spread_limit,
-                      spread_warn=spread_warn)
+                      spread_warn=spread_warn, target_delta=target_delta)
     if isinstance(picked, str):
         return Reject(row.ticker, picked)
     return _candidate(row, picked, snapshot=snapshot, spot=spot, ma50=ma50, expiry=expiry,
-                      days=days, in_window=in_window, dte_mode=dte_mode, earnings=earnings)
+                      days=days, in_window=in_window, dte_mode=dte_mode, earnings=earnings,
+                      target_delta=target_delta)

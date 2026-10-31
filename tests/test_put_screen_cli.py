@@ -445,3 +445,77 @@ def test_open_save_keeps_broker_block_written_meanwhile(env, monkeypatch):
     spreads = spread_ledger.load(path)["spreads"]
     assert len(spreads) == 2
     assert spreads[0]["broker"] == {"status": "submitted", "order_ref": "rwh-1-LIVE0001"}
+
+
+# --- --delta target -------------------------------------------------------------------------------
+BAD_DELTAS = ["abc", "", "nan", "inf", "-0.1", "0", "0.04", "0.41", "0.5", "0.125"]
+
+
+def _collect(env):
+    """Every file the run wrote, by relative path -> bytes."""
+    root = env["ledger"]
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def _run_collect(env, capsys, *delta_args):
+    capsys.readouterr()
+    assert run(env, "suggest", "--dte", "monthly", *delta_args) == 0
+    return _collect(env), capsys.readouterr().out
+
+
+@pytest.mark.parametrize("bad", BAD_DELTAS)
+def test_cli_delta_bad_exit_2_writes_nothing(env, capsys, bad):
+    with pytest.raises(SystemExit) as exc:
+        run(env, "suggest", "--delta", bad)
+    assert exc.value.code == 2
+    assert "--delta 须是 0.05–0.40 之间、最多两位小数的数" in capsys.readouterr().err
+    assert not env["ledger"].exists()
+
+
+def test_cli_delta_default_byte_identical(env, capsys):
+    base = _run_collect(env, capsys)
+    assert _run_collect(env, capsys, "--delta", "0.20") == base
+    assert _run_collect(env, capsys, "--delta", "0.2") == base
+    assert b"target_delta" not in base[0][f"suggestions/{SNAP}-AAA-put.json"]
+
+
+def test_cli_delta_015_rules_line_and_json(env, capsys):
+    files, out = _run_collect(env, capsys)
+    files15, out15 = _run_collect(env, capsys, "--delta", "0.15")
+    line = "规则：30–45 天月度到期、Delta 0.15（--delta，价差过宽时往外最多到 0.10）、买卖价差 ≤5%"
+    for name in (f"put-screen/{SNAP}.md", f"suggestions/{SNAP}-AAA-put.md"):
+        assert line in files15[name].decode("utf-8")
+        assert "Delta 0.20" in files[name].decode("utf-8")
+    assert _summary(env)["rules"]["target_delta"] == 0.15
+    cand = json.loads(files15[f"suggestions/{SNAP}-AAA-put.json"])
+    assert cand["target_delta"] == 0.15
+    assert out15.splitlines() == out.splitlines()  # the console gains no line
+
+
+def test_cli_delta_with_tickers_dotted(env, monkeypatch):
+    assert run(env, "suggest", "--dte", "monthly", "--tickers", "ZZ.Q", "--delta", "0.15") == 0
+    assert (env["ledger"] / "suggestions" / f"{SNAP}-ZZ.Q-put.json").exists()
+
+
+def test_open_records_candidate_target_delta(env):
+    assert run(env, "suggest", "--dte", "monthly", "--delta", "0.15") == 0
+    assert run(env, "open", "AAA") == 0
+    rec = spread_ledger.load(env["ledger"] / "spreads.json")["spreads"][0]
+    assert rec["delta_target"] == 0.15
+
+
+def test_open_legacy_candidate_records_default(env):
+    _suggest(env)
+    assert run(env, "open", "AAA") == 0
+    rec = spread_ledger.load(env["ledger"] / "spreads.json")["spreads"][0]
+    assert rec["delta_target"] == 0.2
+
+
+@pytest.mark.parametrize("bad", ["0.15", -0.1, 0.9, None, True])
+def test_open_rejects_damaged_target_delta(env, capsys, bad):
+    path, doc = _suggest(env)
+    doc["target_delta"] = bad
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    assert run(env, "open", "AAA") == 1
+    assert "suggest" in capsys.readouterr().err
+    assert not (env["ledger"] / "spreads.json").exists()

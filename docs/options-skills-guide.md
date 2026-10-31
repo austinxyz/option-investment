@@ -19,7 +19,7 @@
 
 ## 策略和工具的对应
 
-`wiki/options/strategies/` 里有 9 篇策略页，但模拟盘工具只覆盖其中一部分。下表说清楚哪个策略能在模拟盘里试、用哪个命令，哪个没有工具以及为什么。
+`wiki/options/strategies/` 里有 9 篇已分析的策略页，但模拟盘工具只覆盖其中一部分。下表说清楚哪个策略能在模拟盘里试、用哪个命令，哪个没有工具以及为什么。
 
 | 策略页 | 模拟盘工具 | 说明 |
 |---|---|---|
@@ -35,15 +35,34 @@
 
 策略页只讲概念和风险，数字是来源里说的，不构成投资建议；"无工具"不代表不能做，只是没法在模拟盘里自动筛选和记账。
 
-八个命令共用**同一个账本**（价差、Sell Put、Covered Call、Collar / 保护性 Put、铁鹰、Call 借方价差记在一起，用 `strategy` 字段区分），所以报告里能并排比较各策略的胜率。
+六个开仓命令（`/spread-sim`、`/put-screen`、`/call-screen`、`/collar-screen`、`/condor-sim`、`/bullcall-sim`）共用**同一个账本**（价差、Sell Put、Covered Call、Collar / 保护性 Put、铁鹰、Call 借方价差记在一起，用 `strategy` 字段区分），所以报告里能并排比较各策略的胜率。`/paper-book` 是看账本的总入口，`/strategy-pick` 只读、不写账本。
 
-**review（每周建议）和复盘不在 `/spread-sim` 里，而是单独的命令，但覆盖整个账本——价差也在内。** `/spread-sim` 负责开仓、平仓、看盈亏、到期结算；`/option-review` 给价差和 Sell Put 的每笔未平仓持仓出建议；`/option-journal` 比较这些建议和最终结果。三者读写同一份数据，所以你的价差持仓不需要另外做什么就会被检查。
+**review（每周建议）和复盘不在各个开仓命令里，而是单独的命令，但覆盖整个账本，所有策略都在内。** 开仓命令负责出候选、开仓、平仓、看盈亏、到期结算；`/option-review` 给账本里每笔未平仓持仓（价差、Sell Put、Covered Call、Collar / 保护性 Put、铁鹰、Call 借方价差）出建议；`/option-journal` 比较这些建议和最终结果。三者读写同一份数据，所以不管哪个命令开的仓，都不需要另外做什么就会被检查。
+
+## 完全没有的策略
+
+`wiki/options/strategies/` 里除了上面 9 篇，还有一些常见策略连页面都没有。这不是漏了，下面逐类说明原因；想加工具，要先有策略页和可检验的规则，再做命令。
+
+**完全没有页面，也没有工具**
+
+| 策略 | 为什么没有 |
+|---|---|
+| 日历价差、对角价差 | 同样是到期日不同，账本放不进去 |
+| 跨式、宽跨式（买或卖） | 做的是波动率而不是方向，现有的七步决策树只处理"看好 / 中性 / 不看好"，没有对应的叶子；也没有可检验的规则 |
+| 蝶式、比例价差 | 结构更复杂（三条以上的腿或不对称张数），没有策略页，也没有可检验的规则 |
+| 买入 Call / 买入 Put、裸卖 Call | 有策略页，但**明确不做**：前者没有可检验的规则，模拟盘测不出东西；后者风险无限（见上表） |
+
+**怎么看这份清单**：模拟盘的目的是用固定规则积累样本、看"建议准不准"（`/option-journal` 要 30 笔以上才下结论）。结构越复杂、越依赖主观判断的策略，越难凑出可比较的样本，所以现有工具集中在规则清楚的看涨 / 中性策略上。"没有工具"不代表这些策略不能做，只是没法在模拟盘里自动筛选和记账。
 
 ## 一周怎么走（建议流程）
 
 0. **不知道该用哪个策略时**：先跑 `/strategy-pick TICKER`，它按你的看法、走势和 IV 位置推荐 1–2 个策略和下一步命令（见下面 "/strategy-pick" 一节），再用对应的命令挑合约。
-1. **IBKR 模式任何时段都能跑**（盘中数据最新，休市后用的是延迟冻结的上一交易日数据；Yahoo 模式建议美东开盘时间，休市后 bid/ask 常为空，见 `docs/option-data-sources.md`）：`/put-screen` → 看汇总表和每只的说明 → 想开的用 `open`。
-2. **想试价差**：`/spread-sim suggest TICKER` → 看三档候选 → 选一档 `open`（详见下面"价差怎么开仓和平仓"）。
+1. **按策略挑合约、开仓**（所有开仓命令都是同一个套路：`suggest` 出候选 → 看说明文件 → 选一档 `open`，`open` 记的就是你看过的那份，不重新取行情）：
+   - **现金担保 Put**：`/put-screen`，不用传 ticker，扫整个 wiki 列表。IBKR 模式任何时段都能跑（盘中数据最新，休市后用的是延迟冻结的上一交易日数据；Yahoo 模式建议美东开盘时间，休市后 bid/ask 常为空，见 `docs/option-data-sources.md`）。
+   - **Bull Put 价差**：`/spread-sim suggest TICKER`（详见下面"价差怎么开仓和平仓"）。
+   - **Call 借方价差**：`/bullcall-sim suggest TICKER`；**铁鹰**：`/condor-sim suggest TICKER`。
+   - **备兑 Call**：`/call-screen suggest`；**Collar / 保护性 Put**：`/collar-screen suggest`。这两个对**持股**出候选，不用传 ticker。
+2. **开仓前核对**：把说明文件里的行权价、Delta、权利金和券商期权链核一遍。同一 ticker、同一到期日不能重复开（跨策略也算重复）。
 3. **每周五**：手动 `/option-review`。
 4. **持仓过程中**：`status` 看浮盈亏（到期的会自动结算）；想提前了结就 `close ID`。
 5. **到期之后**：不用做什么，`status` 会自动结算；数据积累到一定笔数，用 `/option-journal` 看建议准不准。
@@ -76,13 +95,13 @@
 ### /put-screen（Sell Put 筛选）
 
 ```bash
-./.venv/Scripts/python.exe scripts/put_screen.py suggest [--dte weekly|monthly]
+./.venv/Scripts/python.exe scripts/put_screen.py suggest [--dte weekly|monthly] [--tickers A,B] [--delta X]
 ./.venv/Scripts/python.exe scripts/put_screen.py open TICKER [--contracts N]
 ./.venv/Scripts/python.exe scripts/put_screen.py status
 ./.venv/Scripts/python.exe scripts/put_screen.py close ID
 ```
 
-- `suggest`（不用传 ticker）：扫描 `wiki/tickers/*/overview.md`，用规则剔除不合格的，给每个入选的选一个 Put 合约。默认 `--dte weekly`（周度），也可以 `--dte monthly`。
+- `suggest`（不用传 ticker；想只筛某几只就加 `--tickers A,B`）：扫描 `wiki/tickers/*/overview.md`，用规则剔除不合格的，给每个入选的选一个 Put 合约。默认 `--dte weekly`（周度），也可以 `--dte monthly`。
   - **筛选规则**：Status 不是 Avoid；收盘价高于 MA200；到期前没有财报；买卖价差 ≤ 权利金的 5%；有隐含波动率。
   - **到期规则（两种模式，其余规则完全相同）**：
     - `weekly`（默认）：在所有挂牌到期日（含周度）里，取距快照日 7–14 天内最早的一个；窗口内没有就剔除，理由"没有可用的周度到期"（没有周度合约的标的会被剔除，不回退到别的到期）。
@@ -90,6 +109,7 @@
     - 为什么默认周度：月度 Sell Put 一个月才结算，纸上交易样本积累太慢，也没法和约 7 天的 Bull Put 价差公平比较。周度权利金小、Gamma 高，到期前一周波动比月度大，汇总和说明文件里有固定提示。
     - 同一天换模式重跑会覆盖当天文件（最后一次 `suggest` 为准）。
   - **合约规则**：虚值 Put，Delta 最接近 0.20（偏离超过 0.05 就剔除，价差过宽时最多往下找 3 档，Delta 不低于 0.10）。
+  - **`--delta X`**：改目标 Delta，范围 0.05–0.40、最多两位小数（0.125、0.5 直接拒绝，退出码 2），默认 0.20。价差过宽时往外最多走到 0.10 或目标（取小者），所以目标 0.10 及以下不往外走。非默认时规则行和逐只 JSON 的 `target_delta` 会写明目标。文件名不带 Delta，同一天换 `--delta` 重跑会覆盖当天的候选与汇总，与换 `--dte` 一样。
   - 输出：汇总 `data/paper-trading/put-screen/<日期>.md`（按 🏦 蓝筹 / 🚀 翻倍 / ⚡ 动量 / 未分类分表，加被剔除原因）；每只入选的说明 `suggestions/<日期>-<TICKER>-put.md`。
 - `open`：记录保存的那个合约；如果最新一次筛选已经把这只剔除了，会拒绝，请重新 `suggest`。
 - `status` / `close`：和 `/spread-sim` 是同一个（两种策略一起处理）。
@@ -99,7 +119,7 @@
 ### /call-screen（备兑 Call 筛选）
 
 ```bash
-./.venv/Scripts/python.exe scripts/call_screen.py suggest [--dte weekly|monthly]
+./.venv/Scripts/python.exe scripts/call_screen.py suggest [--dte weekly|monthly] [--delta X]
 ./.venv/Scripts/python.exe scripts/call_screen.py open TICKER [--lot real|<ID>] [--contracts N]
 ./.venv/Scripts/python.exe scripts/call_screen.py status
 ./.venv/Scripts/python.exe scripts/call_screen.py close ID
@@ -109,7 +129,7 @@
 ```
 
 - **三种持股来源**：真实持仓（每次现读 `data/positions.md`，**只读**，同一 ticker 跨账户合并）；手动添加的假设持仓（`shares add`）；账本里被指派的现金担保 Put（`suggest` 或 `status` 时自动变成假设持仓）。每个持仓独立出候选，每 100 股可卖一张。
-- `suggest`（不用传 ticker）：对持股表里每个能覆盖至少一张的持仓，选一个虚值 Call，Delta 最接近 0.20。默认 `--dte weekly`（距今天 7–14 天最近到期），也可以 `monthly`。汇总在 `data/paper-trading/call-screen/<日期>.md`，逐只说明在 `suggestions/<日期>-<TICKER>-call-real.md` 或 `-call-lot<ID>.md`。
+- `suggest`（不用传 ticker）：对持股表里每个能覆盖至少一张的持仓，选一个虚值 Call，Delta 最接近 0.20（可用 `--delta X` 改，范围 0.05–0.40、最多两位小数，默认 0.20；价差过宽时往行权价更高处最多走到 0.10 或目标，取小者；同一天换 `--delta` 重跑会覆盖当天文件）。默认 `--dte weekly`（距今天 7–14 天最近到期），也可以 `monthly`。汇总在 `data/paper-trading/call-screen/<日期>.md`，逐只说明在 `suggestions/<日期>-<TICKER>-call-real.md` 或 `-call-lot<ID>.md`。
   - **规则**：到期前有财报 → 排除；除息日在到期前、行权价低于成本、财报日期未知 → 只警告，不排除；Delta 偏离、价差过宽、缺 IV → 排除。
   - **不判断"涨不动"**：汇总里列出现价、相对 MA50 / MA200、近一月涨幅，只是信息；卖哪只由你自己挑。
   - **低于成本的警告**：行权价低于成本时，会写明被行权相对原始成本、相对有效成本（扣掉已收权利金）每股亏多少。
@@ -297,7 +317,8 @@ Wheel：卖现金担保 Put → 被指派拿到股票 → 对股票卖 Call → 
 - **IV 位置是代理**：数据源没有 IV 历史，所以拿平值 IV 对自己过去一年的 21 日实现波动率分布做百分位，不是真正的 IV Rank；IV 缺失时退到实现波动率自比，是再退一步的代理。过去一年整体偏高或偏低时，百分位会误导。
 - **±15% 内行权价个数是代理**：按全链合并计数，可能多算。
 - **占比标记**：现金担保 Put 与 Bull Put 谁排第一，取决于"参考行权价 × 100 占组合约 x%"（≤ 10% 且蓝筹或 ETF → 现金担保 Put 第一）。这个占比挂在其中一个推荐的标记 `portfolio_share` 上；组合总值取不到时标 `rank_by_class_only`，只按类别排。文件里只写取整到两位小数的占比（如 `0.16`），组合总值本身不写。
-- **下一步命令有它们自己的限制**：`/put-screen`、`/call-screen`、`/collar-screen` 都扫整个列表、不接 ticker；`/put-screen` 和 `/call-screen` 固定取 Delta 0.20（Put 往下最多到 0.10），`/collar-screen` 不按 Delta，而是按现价 90% / 85% / 80% 三档选 Put，所以远价外或"下行"的情形它们可能不出这只票；`/spread-sim`、`/condor-sim`、`/bullcall-sim` 才是对你给的 ticker 出候选。
+- **下一步命令有它们自己的限制**：`/put-screen` 接 `--tickers`（只筛你给的票，绕过 wiki 的 Avoid / 复核中状态），`/call-screen`、`/collar-screen` 不接 ticker、扫整个持股列表；`/put-screen` 和 `/call-screen` 接 `--delta`（0.05–0.40，默认 0.20，价差过宽时往外最多走到 0.10 或目标），`/collar-screen` 不按 Delta，而是按现价 90% / 85% / 80% 三档选 Put，所以远价外或"下行"的情形它们可能不出这只票；`/spread-sim`、`/condor-sim`、`/bullcall-sim` 才是对你给的 ticker 出候选。
+- **带过去**：报告里有 `### 把 Delta 目标带到下一步` 小节，控制台每个带 Delta 的推荐下有一行 `带过去：`，写出用哪个命令、选哪档（例如 `/put-screen suggest --dte monthly --tickers ZZZQ --delta 0.15`，或先 `/spread-sim suggest ZZZQ` 再 `open ZZZQ 0.15`）；Collar / 保护性 Put 带不过去，会写明并指向报告的"参考价位"。
 - 它**不选合约**：参考价位 = 现价 ∓ z × 1σ 预期波动（线性近似，忽略漂移和偏度，标"粗略"），只是给你去挑合约时的区间。
 
 用虚构的 ZZZQ 示范（运行日 2026-10-25，行情快照日 2026-10-23；蓝筹，wiki 状态 Active → 看好，论点 56 天未过期；未持有；虚构的组合总值 200,000）：
@@ -311,7 +332,7 @@ Wheel：卖现金担保 Put → 被指派拿到股票 → 对股票卖 Call → 
 - 走势：R1y = 100.00 ÷ 80.00 − 1 = +25.0%，MA50 96.00 > MA200 90.00，MA200 斜率 +2.04%，最大回撤 15.0%、一年实现波动率 30.0% 都低于蓝筹的高波动线 → 叶子"稳步上涨"。
 - IV 位置：252 个收盘 → 251 个日对数收益 → 251 − 21 + 1 = **231 个 21 日窗口**；其中 174 个 ≤ 当前平值 IV 0.32，174 ÷ 231 = 0.75325 → **75.3%，高**（≥ 70%）。
 - 1σ 预期波动 = 100 × 0.32 × √(28 ÷ 365) = 8.863037（显示 8.86）。Delta 0.20 的参考行权价 ≈ 100 − 0.84 × 8.863037 = **92.56**（粗略）。
-- 排序：92.56 × 100 = 9,256，占组合 9,256 ÷ 200,000 = 4.6% ≤ 10%，且是蓝筹 → **第一：现金担保 Put（下一步 `/put-screen suggest --dte monthly`）；第二：Bull Put 价差（下一步 `/spread-sim suggest ZZZQ`）**。Bull Call、铁鹰、备兑 Call / Collar 各有一句"为什么不选"和策略页链接。
+- 排序：92.56 × 100 = 9,256，占组合 9,256 ÷ 200,000 = 4.6% ≤ 10%，且是蓝筹 → **第一：现金担保 Put（下一步 `/put-screen suggest --dte monthly`）；第二：Bull Put 价差（下一步 `/spread-sim suggest ZZZQ`）**。报告和控制台里的"带过去"会把第一推荐写成可直接运行的 `/put-screen suggest --dte monthly --tickers ZZZQ`（目标 0.20 不用加 `--delta`）。Bull Call、铁鹰、备兑 Call / Collar 各有一句"为什么不选"和策略页链接。
 
 只改一处的变体（其余同上）：
 

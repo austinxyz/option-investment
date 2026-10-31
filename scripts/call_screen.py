@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Covered-call paper screen — CLI.
 
-    call_screen.py suggest [--dte {weekly,monthly}]  # screen held lots, save candidates (no ledger write)
+    call_screen.py suggest [--dte {weekly,monthly}] [--delta X]  # screen held lots, save candidates (no ledger write)
     call_screen.py open TICKER [--lot real|ID] [--contracts N]  # records the saved candidate
     call_screen.py status | close ID                 # shared with spread_sim
     call_screen.py shares add TICKER --shares N --cost C | list | remove ID
@@ -51,9 +51,9 @@ def _write_json(path: Path, doc: dict) -> None:
                     encoding="utf-8")
 
 
-def _rules_doc(dte_mode: str) -> dict:
+def _rules_doc(dte_mode: str, target: float = rules.TARGET_DELTA) -> dict:
     doc = {"dte_mode": dte_mode, "window_days": list(WINDOWS[dte_mode]),
-           "target_delta": rules.TARGET_DELTA, "max_spread_pct": rules.MAX_SPREAD_PCT}
+           "target_delta": target, "max_spread_pct": rules.MAX_SPREAD_PCT}
     spread = option_settings.spread_kwargs()  # empty in IBKR: the document keeps its old keys
     if spread:
         doc["max_spread_pct"] = spread["spread_limit"]
@@ -97,7 +97,8 @@ def _fetch_all(lots: list, avail: dict) -> tuple[dict, dict]:
     return got, failed
 
 
-def _evaluate(lot, market: dict, snapshot: date, available: int, dte_mode: str, fns: dict):
+def _evaluate(lot, market: dict, snapshot: date, available: int, dte_mode: str, fns: dict,
+              target: float = rules.TARGET_DELTA):
     ticker = lot.ticker
     try:
         return rules.evaluate_lot(
@@ -107,6 +108,7 @@ def _evaluate(lot, market: dict, snapshot: date, available: int, dte_mode: str, 
             earnings_for=lambda e: fns["earnings"](ticker, e),
             ex_div_for=lambda e: fns["ex_div"](ticker, e),
             calls_for=lambda e: fns["calls"](ticker, e), dte_mode=dte_mode,
+            target_delta=target,
             **option_settings.spread_kwargs())
     except spread_data.SourceUnavailable:
         raise
@@ -124,7 +126,8 @@ def _market_fns(snapshot: date) -> dict:
     }
 
 
-def _screen(lots: list, led: dict, today: date, dte_mode: str) -> tuple[list, list, date]:
+def _screen(lots: list, led: dict, today: date, dte_mode: str,
+            target: float = rules.TARGET_DELTA) -> tuple[list, list, date]:
     avail = {l.key: holdings.contracts_available(l, led) for l in lots}
     got, failed = _fetch_all(lots, avail)
     snapshot = (Counter(m["snapshot"] for m in got.values()).most_common(1)[0][0]
@@ -138,7 +141,7 @@ def _screen(lots: list, led: dict, today: date, dte_mode: str) -> tuple[list, li
         elif lot.ticker in failed:
             res = rules.Reject(lot.label, failed[lot.ticker])
         else:
-            res = _evaluate(lot, got[lot.ticker], snapshot, avail[lot.key], dte_mode, fns)
+            res = _evaluate(lot, got[lot.ticker], snapshot, avail[lot.key], dte_mode, fns, target)
         (rejects if isinstance(res, rules.Reject) else candidates).append(res)
     return candidates, rejects, snapshot
 
@@ -158,7 +161,7 @@ def _remove_stale_candidates(folder: Path, stamp: str) -> None:
 
 def _write_outputs(ledger_dir: Path, candidates: list, rejects: list, stamp: str,
                    today: date, intraday: bool, dte_mode: str,
-                   notes: tuple[str, ...] = ()) -> Path:
+                   notes: tuple[str, ...] = (), target: float = rules.TARGET_DELTA) -> Path:
     generated = today.isoformat()
     sug_dir, out_dir = ledger_dir / SUGGESTIONS_DIR, ledger_dir / SUMMARY_DIR
     sug_dir.mkdir(parents=True, exist_ok=True)
@@ -174,9 +177,9 @@ def _write_outputs(ledger_dir: Path, candidates: list, rejects: list, stamp: str
     summary = out_dir / f"{stamp}.md"
     summary.write_text(option_labels.add_notes(render.render_summary_md(
         candidates, rejects, stamp, generated, intraday, message=message,
-        dte_mode=dte_mode), notes), encoding="utf-8")
+        dte_mode=dte_mode, target=target), notes), encoding="utf-8")
     _write_json(out_dir / f"{stamp}.json", render.summary_to_json(
-        candidates, rejects, stamp, generated, intraday, _rules_doc(dte_mode)))
+        candidates, rejects, stamp, generated, intraday, _rules_doc(dte_mode, target)))
     return summary
 
 
@@ -196,12 +199,13 @@ def cmd_suggest(args, ledger_dir: Path, today: date) -> int:
     seed = option_labels.demo_seed_hint(lots)
     if seed:
         print(seed)
-    candidates, rejects, snapshot = _screen(lots, led, today, args.dte)
+    candidates, rejects, snapshot = _screen(lots, led, today, args.dte, args.delta)
     intraday = snapshot == today and spread_data.market_open_now()
     drops = option_labels.stale_drop_line(
         option_labels.stale_drop_total((c["ticker"], c["expiry"]) for c in candidates))
     summary = _write_outputs(ledger_dir, candidates, rejects, snapshot.isoformat(),
-                             today, intraday, args.dte, option_labels.run_notes(hint, drops))
+                             today, intraday, args.dte, option_labels.run_notes(hint, drops),
+                             args.delta)
     option_labels.print_notes(option_labels.run_notes(drops))
     print(f"汇总已保存：{summary}")
     print(f"候选 {len(candidates)} 个，剔除 {len(rejects)} 个。"
@@ -230,6 +234,15 @@ def _check_candidate(doc: dict, ticker: str, slug: str) -> None:
     spread_sim._number(doc["spread_pct"], "spread_pct", allow_none=True)
     if not isinstance(doc["warnings"], list):
         raise ValueError("warnings 不是列表")
+    if "target_delta" in doc:  # absent in files saved before --delta existed
+        _check_target_delta(doc["target_delta"])
+
+
+def _check_target_delta(value) -> None:
+    """A hand-edited target_delta must still be a real number inside the --delta range."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not (
+            rules.DELTA_ARG_MIN <= value <= rules.DELTA_ARG_MAX):
+        raise ValueError("target_delta 取值不对")
 
 
 def _saved_files(ledger_dir: Path, ticker: str) -> list[tuple[str, str, Path]]:
@@ -316,7 +329,8 @@ def _record(doc: dict, contracts: int, lot) -> dict:
         "credit": doc["mid"], "short_mid": doc["mid"], "long_mid": None,
         "short_spread_pct": doc["spread_pct"], "long_spread_pct": None,
         "short_delta": doc["delta"], "short_iv": doc["iv"],
-        "delta_target": rules.TARGET_DELTA, "dte_mode": doc.get("dte_mode", DEFAULT_DTE),
+        "delta_target": doc.get("target_delta", rules.TARGET_DELTA),
+        "dte_mode": doc.get("dte_mode", DEFAULT_DTE),
         "tier": None, "earnings_in_window": EARNINGS_FLAG[doc["earnings"]],
         "monday_gap_pct": None, "status": "open",
         "exit_date": None, "exit_cost": None, "exit_underlying": None,
@@ -425,6 +439,9 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("suggest", help="筛选持仓，保存候选（不写账本）")
     s.add_argument("--dte", choices=("weekly", "monthly"), default=DEFAULT_DTE,
                    help="到期类型：weekly = 7–14 天最近到期（默认），monthly = 30–45 天月度")
+    s.add_argument("--delta", type=rules.delta_arg, default=rules.TARGET_DELTA, metavar="0.15",
+                   help="短 Call 的目标 Delta（0.05–0.40，最多两位小数；默认 0.20）；"
+                        "价差过宽时往外最多走到 0.10 或目标（取小者）")
     o = sub.add_parser("open", help="记录已保存的候选")
     o.add_argument("ticker", type=spread_sim._ticker_arg)
     o.add_argument("--lot", type=_lot_arg, default=None, help="real 或假设持仓编号")

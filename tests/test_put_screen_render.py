@@ -151,3 +151,32 @@ def test_data_source_labelling_frozen_and_intraday():
     live = "数据源 IBKR 模拟网关 · 基于 2026-10-18 收盘（盘中延迟行情）"
     assert live in render.render_summary_md([c], [], "2026-10-18", "2026-10-18", intraday=True)
     assert live in render.render_ticker_md(c, intraday=True)
+
+
+# --- --delta target in the rules line -----------------------------------------------------------
+import option_settings
+from put_screen_rules import DELTA_RULE_NOTE
+
+OLD_RULES = {
+    "monthly": "规则：30–45 天月度到期、Delta 0.20、买卖价差 ≤5%",
+    "weekly": "规则：7–14 天最近到期（含周度）、Delta 0.20、买卖价差 ≤5%",
+}
+
+
+def test_rules_line_default_unchanged():
+    for mode, old in OLD_RULES.items():
+        assert render.rules_line(mode) == old == render.rules_line(mode, 0.2)
+
+
+def test_rules_line_non_default_target():
+    assert render.rules_line("monthly", 0.15) == (
+        "规则：30–45 天月度到期、Delta 0.15（--delta，价差过宽时往外最多到 0.10）、买卖价差 ≤5%")
+    assert DELTA_RULE_NOTE.format(floor=0.1) in render.rules_line("weekly", 0.15)
+
+
+def test_rules_line_yahoo_and_delta_fragments(monkeypatch):
+    monkeypatch.setattr(option_settings, "is_ibkr", lambda: False)
+    monkeypatch.setattr(option_settings, "data_source", lambda: "yahoo")
+    got = render.rules_line("monthly", 0.15)
+    assert got == ("规则：30–45 天月度到期、Delta 0.15（--delta，价差过宽时往外最多到 0.10）、"
+                   "买卖价差 ≤10%（Yahoo 模式放宽；5%–10% 警告）")

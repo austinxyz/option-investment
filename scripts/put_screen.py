@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Cash-secured put screen — CLI.
 
-    put_screen.py suggest [--dte {weekly,monthly}] [--tickers A,B]  # default weekly; screen the universe, save candidates (no ledger write)
+    put_screen.py suggest [--dte {weekly,monthly}] [--tickers A,B] [--delta X]  # default weekly; screen the universe, save candidates (no ledger write)
     put_screen.py open TICKER [--contracts N]  # records the saved candidate, never re-fetches
     put_screen.py status                     # shared with spread_sim (spreads and puts together)
     put_screen.py close ID
@@ -82,9 +82,9 @@ def resolve_universe(tickers: str | None, wiki_dir: Path, watchlist: Path, sourc
     return put_screen_wiki.universe_from_tickers(",".join(_demo_tickers()))
 
 
-def _rules_doc(dte_mode: str) -> dict:
+def _rules_doc(dte_mode: str, target: float = rules.TARGET_DELTA) -> dict:
     doc = {"dte_mode": dte_mode, "window_days": list(WINDOWS[dte_mode]),
-           "target_delta": rules.TARGET_DELTA, "max_spread_pct": rules.MAX_SPREAD_PCT}
+           "target_delta": target, "max_spread_pct": rules.MAX_SPREAD_PCT}
     spread = option_settings.spread_kwargs()  # empty in IBKR: the document keeps its old keys
     if spread:
         doc["max_spread_pct"] = spread["spread_limit"]
@@ -101,7 +101,8 @@ def _failed(ticker: str, exc: Exception) -> rules.Reject:
     return rules.Reject(ticker, spread_data.fetch_failure_reason(exc))
 
 
-def _evaluate(row, mas: dict, snapshot: date, dte_mode: str) -> dict | rules.Reject:
+def _evaluate(row, mas: dict, snapshot: date, dte_mode: str,
+              target: float = rules.TARGET_DELTA) -> dict | rules.Reject:
     """One ticker's evaluation; a lost gateway aborts, any other trouble becomes a reject."""
     ticker = row.ticker
     try:
@@ -111,7 +112,7 @@ def _evaluate(row, mas: dict, snapshot: date, dte_mode: str) -> dict | rules.Rej
             earnings_for=lambda expiry: spread_data.earnings_status(
                 ticker, snapshot, date.fromisoformat(expiry)),
             puts_for=lambda expiry: spread_data.fetch_puts(ticker, expiry),
-            dte_mode=dte_mode, **option_settings.spread_kwargs())
+            dte_mode=dte_mode, target_delta=target, **option_settings.spread_kwargs())
     except spread_data.SourceUnavailable:
         raise  # the link is gone: the whole run is invalid, not one ticker
     except Exception as exc:  # an odd frame must not stop the screen
@@ -156,7 +157,7 @@ def _remove_stale_candidates(folder: Path, stamp: str) -> None:
 
 
 def cmd_suggest(args, ledger_dir: Path, today: date) -> int:
-    dte_mode = args.dte
+    dte_mode, target = args.dte, args.delta
     # Resolved first: "nothing to screen" must not need a gateway or a network.
     universe = resolve_universe(args.tickers, WIKI_DIR, WATCHLIST, option_settings.data_source())
     if not universe:
@@ -171,7 +172,7 @@ def cmd_suggest(args, ledger_dir: Path, today: date) -> int:
     candidates: list[dict] = []
     rejects: list = []
     for row in universe:
-        res = failed.get(row.ticker) or _evaluate(row, got[row.ticker], snapshot, dte_mode)
+        res = failed.get(row.ticker) or _evaluate(row, got[row.ticker], snapshot, dte_mode, target)
         (rejects if isinstance(res, rules.Reject) else candidates).append(res)
     all_no_expiry = bool(universe) and not candidates and all(
         r.reason == NO_EXPIRY_REASON[dte_mode] for r in rejects)
@@ -193,9 +194,9 @@ def cmd_suggest(args, ledger_dir: Path, today: date) -> int:
     summary_json = out_dir / f"{stamp}.json"
     summary.write_text(option_labels.add_notes(render.render_summary_md(
         candidates, rejects, stamp, generated, intraday, message=message,
-        dte_mode=dte_mode), notes), encoding="utf-8")
+        dte_mode=dte_mode, target=target), notes), encoding="utf-8")
     _write_json(summary_json, render.summary_to_json(
-        candidates, rejects, stamp, generated, intraday, _rules_doc(dte_mode)))
+        candidates, rejects, stamp, generated, intraday, _rules_doc(dte_mode, target)))
     option_labels.print_notes(notes[1:] if hint else notes)  # the hint was printed first
     print(f"汇总已保存：{summary}")
     print(f"候选 {len(candidates)} 个，剔除 {len(rejects)} 个。"
@@ -220,6 +221,15 @@ def _check_candidate(doc: dict, ticker: str) -> None:
     spread_sim._number(doc["spread_pct"], "spread_pct", allow_none=True)
     if not isinstance(doc["warnings"], list):
         raise ValueError("warnings 不是列表")
+    if "target_delta" in doc:  # absent in files saved before --delta existed
+        _check_target_delta(doc["target_delta"])
+
+
+def _check_target_delta(value) -> None:
+    """A hand-edited target_delta must still be a real number inside the --delta range."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not (
+            rules.DELTA_ARG_MIN <= value <= rules.DELTA_ARG_MAX):
+        raise ValueError("target_delta 取值不对")
 
 
 def _load_candidate(ledger_dir: Path, ticker: str) -> dict | None:
@@ -281,7 +291,8 @@ def cmd_open(args, ledger_dir: Path, today: date) -> int:
         "credit": doc["mid"], "short_mid": doc["mid"], "long_mid": None,
         "short_spread_pct": doc["spread_pct"], "long_spread_pct": None,
         "short_delta": doc["delta"], "short_iv": doc["iv"],
-        "delta_target": rules.TARGET_DELTA, "dte_mode": doc.get("dte_mode", "monthly"),
+        "delta_target": doc.get("target_delta", rules.TARGET_DELTA),
+        "dte_mode": doc.get("dte_mode", "monthly"),
         "tier": doc.get("tier"),
         "earnings_in_window": EARNINGS_FLAG[doc["earnings"]],
         "monday_gap_pct": None, "status": "open",
@@ -326,6 +337,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="到期类型：weekly = 7–14 天最近到期（默认），monthly = 30–45 天月度")
     s.add_argument("--tickers", type=_tickers_arg, default=None, metavar="AAA,BBB",
                    help="只筛这些代码（优先于 wiki 和 data/watchlist.txt）")
+    s.add_argument("--delta", type=rules.delta_arg, default=rules.TARGET_DELTA, metavar="0.15",
+                   help="短 Put 的目标 Delta（0.05–0.40，最多两位小数；默认 0.20）；"
+                        "价差过宽时往外最多走到 0.10 或目标（取小者）")
     o = sub.add_parser("open", help="记录已保存的候选")
     o.add_argument("ticker", type=spread_sim._ticker_arg)
     o.add_argument("--contracts", type=spread_sim._positive_int, default=1)

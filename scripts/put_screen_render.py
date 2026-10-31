@@ -7,6 +7,7 @@ See docs/superpowers/specs/2026-10-18-put-screen-design.md.
 from __future__ import annotations
 
 import option_labels
+from put_screen_rules import DELTA_RULE_NOTE, TARGET_DELTA, is_default_delta, walk_floor
 
 OPEN_CMD = "./.venv/Scripts/python.exe scripts/put_screen.py open"
 FOOTER = "模拟/研究用途，非投资建议"
@@ -34,8 +35,13 @@ def source_line(snapshot: str, intraday: bool) -> str:
     return option_labels.source_line(snapshot, intraday)
 
 
-def rules_line(mode: str) -> str:
-    return option_labels.rules_text(RULES_LINES[mode], IBKR_SPREAD_RULE)
+def rules_line(mode: str, target: float = TARGET_DELTA) -> str:
+    """The rules sentence; a non-default --delta swaps the Delta words before the Yahoo spread swap."""
+    text = RULES_LINES[mode]
+    if not is_default_delta(target):
+        note = DELTA_RULE_NOTE.format(floor=walk_floor(target))
+        text = text.replace(f"Delta {TARGET_DELTA:.2f}", f"Delta {target:.2f}（{note}）")
+    return option_labels.rules_text(text, IBKR_SPREAD_RULE)
 
 
 def source_fields() -> dict:
@@ -78,7 +84,7 @@ def render_ticker_md(c: dict, intraday: bool) -> str:
         f"# {t}{tier} 现金担保 Put（{MODE_LABEL[mode]}） · 快照 {c['snapshot_date']}（{kind}）", "",
         "*由 `put_screen` 生成。纸上交易，未写入账本；确认后用 `open` 记录。*", "",
         f"*{source_line(c['snapshot_date'], intraday)}。*", "",
-        f"*{rules_line(mode)}。*", ""] + ([f"> {WEEKLY_WARNING}", ""] if mode == "weekly" else []) + [
+        f"*{rules_line(mode, c.get('target_delta', TARGET_DELTA))}。*", ""] + ([f"> {WEEKLY_WARNING}", ""] if mode == "weekly" else []) + [
         "## 合约", "",
         f"- **卖出 {c['expiry']} 到期 ${c['strike']:g} Put**，到期还有 {c['days']} 天{window}；现价 ${c['spot']:,.2f}。",
         f"- 权利金中间价 ${c['mid']:.2f}/股，买卖价差 {c['spread_pct'] * 100:.1f}%"
@@ -130,10 +136,10 @@ def _table(rows: list[dict]) -> list[str]:
 
 def render_summary_md(candidates: list[dict], rejects: list, snapshot: str, generated_on: str,
                       intraday: bool, *, message: str | None = None,
-                      dte_mode: str = "monthly") -> str:
+                      dte_mode: str = "monthly", target: float = TARGET_DELTA) -> str:
     kind = "盘中快照" if intraday else "收盘"
     lines = [f"# 现金担保 Put 筛选（{MODE_LABEL[dte_mode]}） · 快照 {snapshot}（{kind}）", "",
-             f"*生成于 {generated_on}。{rules_line(dte_mode)}。*", "",
+             f"*生成于 {generated_on}。{rules_line(dte_mode, target)}。*", "",
              f"*{source_line(snapshot, intraday)}。*", ""]
     if message is not None:
         return option_labels.with_banner("\n".join(lines + [message, "", FOOTER, ""]))

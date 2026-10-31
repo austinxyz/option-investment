@@ -61,17 +61,19 @@ Read `data/config.md` and extract the `lang` field (default `zh`). If `--lang zh
 3. **组合占比标记**：现金担保 Put 或 Bull Put 排名由"参考行权价 × 100 占组合约 x%"和类别决定。报告里这个占比挂在其中一个推荐的标记上：`portfolio_share=<两位小数>`（如 `0.16`，报告写"占组合约 16%"）；组合总值取不到时标 `rank_by_class_only`，意思是只按类别排序。**只转述百分比，不要报组合总值**（文件里只写取整后的占比，组合总值本身不写）。
 4. **为什么不选**：每个未选策略一句理由和策略页链接，简要带过。
 5. **步骤表**：七步表由运行时的常量算出，看数字时以报告为准。
-6. **下一步命令与它的限制**（必须同时讲，不要只给命令）：
+6. **下一步命令、怎么带过去、限制**（必须同时讲，不要只给命令）。报告里有 `### 把 Delta 目标带到下一步` 小节、控制台每个带 Delta 的推荐下有一行 `带过去：`：**把这些命令原样转给用户**，不要自己改写档位、Delta 或参数，也不要自己换算。表里的 `ZZZQ` 是虚构 ticker，实际是用户给的那只：
 
-   | 策略 | 下一步 | 限制 |
-   |------|--------|------|
-   | 现金担保 Put | `/put-screen suggest --dte monthly` | 它**扫整个 wiki 列表、不接 ticker**；要求收盘价在 MA200 之上、到期前无财报、固定取 Delta 0.20（往下最多到 0.10），所以远价外和"下行"的情形它**可能不出这只票** |
-   | Bull Put 价差 | `/spread-sim suggest TICKER` | 三档 0.20 / 0.15 / 0.10；远价外选 0.10 或 0.15 档 |
-   | Bull Call 价差 | `/bullcall-sim suggest TICKER` | 买方策略，净支出全亏的风险 |
-   | 铁鹰 | `/condor-sim suggest TICKER` | 大涨对铁鹰是满额亏损 |
-   | 备兑 Call | `/call-screen suggest --dte monthly` | 扫全部持股、固定取 Delta 0.20，可能不出这只票 |
-   | Collar / 保护性 Put | `/collar-screen suggest` | 扫全部持股，档位按现价 90% / 85% / 80% 选 Put |
+   | 下一步 | 怎么带过去 | 限制 |
+   |--------|------------|------|
+   | 现金担保 Put：`/put-screen suggest --dte monthly` | 加 `--tickers ZZZQ` 只筛这一只；目标 0.15 时再加 `--delta 0.15`（目标 0.20 不用加） | `--tickers` 绕过 wiki 的 Avoid / 复核中状态；仍要求收盘价在 MA200 之上、到期前无财报，价差过宽时往外最多走到 0.10 或目标（取小者），所以远价外和"下行"的情形它**可能剔掉这只票** |
+   | Bull Put 价差：`/spread-sim suggest ZZZQ` | 先 `suggest`，再 `open ZZZQ 0.15`（或更价外的 `open ZZZQ 0.10`） | 只有 0.20 / 0.15 / 0.10 三档，目标会就近放进这三档 |
+   | Bull Call 价差：`/bullcall-sim suggest ZZZQ` | 先 `suggest`，再 `open ZZZQ 0.60`（或更便宜的 `open ZZZQ 0.50`） | 买方策略，净支出全亏的风险 |
+   | 铁鹰：`/condor-sim suggest ZZZQ` | 先 `suggest`，再 `open ZZZQ 0.15` | 大涨对铁鹰是满额亏损 |
+   | 备兑 Call：`/call-screen suggest --dte monthly` | 目标 0.15 时加 `--delta 0.15` | 它不接 ticker，扫全部持股，`--delta` 对这次扫的每只持股都生效；价差过宽时往外最多走到 0.10 或目标（取小者），可能不出这只票 |
+   | Collar / 保护性 Put：`/collar-screen suggest` | **带不过去**：它不按 Delta 选，按现价 90% / 85% / 80% 三档列出 Put（Collar 的 Call 取零成本） | Delta 目标带不过去；对照报告里的"参考价位"，挑最接近的一档 |
    | 不做 / 继续持有 / 减仓 | 无，或 `/stock-review TICKER` | — |
+
+   `/put-screen` 和 `/call-screen` 的 `--delta` 范围是 0.05–0.40、最多两位小数，默认 0.20；`/put-screen` 接 `--tickers`，`/call-screen`、`/collar-screen` 不接 ticker。
 
 7. 提醒：工具只给策略方向和参考区间，**不选合约、不推荐具体档位**；样本局限（一年只是一个行情阶段，高低 IV 是对自己过去一年比，工具不预测方向）报告里有固定一节。
 

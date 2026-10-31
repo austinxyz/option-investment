@@ -329,3 +329,129 @@ def test_view_row_shows_chinese_status_label(monkeypatch, tmp_path, status, labe
 
 def test_unused_needs_user_statuses_removed():
     assert not hasattr(rules, "NEEDS_USER_STATUSES")
+
+
+# ---- Delta-target hand-off (plan 2026-10-26-delta-target-handoff, Task 4) ----
+
+HANDOFF_TITLE = "### 把 Delta 目标带到下一步"
+HANDOFF_PREFIX = "     带过去："
+CSP_CAVEAT = ("加 --tickers 只筛这一只（不再读 wiki 的 Avoid / 复核中状态）；仍要求收盘价在 MA200 之上、"
+              "到期前无财报，远价外和下行的情形它可能剔掉这只票")
+CC_CAVEAT = "扫全部持股，不接 ticker；Delta 用 --delta 指定（见上一节），不指定就是 0.20"
+
+
+def _held(rows=((150.0, True),)):
+    return D.HoldingRead(tuple(D.HoldingRow(s, lt, "active") for s, lt in rows), None, False,
+                         False)
+
+
+def _without_handoff(monkeypatch, doc) -> tuple[str, str]:
+    """What the report and console were before the hand-off existed (no section, no lines)."""
+    import strategy_pick_handoff as handoff
+    with monkeypatch.context() as m:
+        m.setattr(handoff, "handoff_lines", lambda *a, **k: [])
+        m.setattr(handoff, "handoff_body", lambda *a, **k: None)
+        return (render.render_markdown(doc, diagram="x.svg"),
+                render.render_console(doc, render.Path("a.md"), render.Path("a.json")))
+
+
+def _assert_no_handoff(monkeypatch, doc):
+    md = render.render_markdown(doc, diagram="x.svg")
+    console = render.render_console(doc, render.Path("a.md"), render.Path("a.json"))
+    assert HANDOFF_TITLE not in md and "带过去" not in console
+    assert (md, console) == _without_handoff(monkeypatch, doc)
+    # Neither reworded caveat applies, so the whole page is byte-for-byte what it was.
+    assert not {"cash_secured_put", "covered_call"} & {p["strategy"] for p in doc["picks"]}
+
+
+@pytest.mark.parametrize("argv,over,leaf", [
+    (("ZZZQ",), "gate", "gate_fail"),
+    (("ZZZQ",), "short", "history_short"),
+    (("ZZZQ", "--view", "不看好"), None, "bear.not_held"),
+    (("ZZZQ", "--view", "不看好", "--class", "hot"), "earnings", "bear.not_held"),
+])
+def test_no_handoff_section_for_gate_fail_history_short_bear_not_held(monkeypatch, tmp_path,
+                                                                     argv, over, leaf):
+    from datetime import date
+    from strategy_pick_cli_stubs import history
+    kw = {"gate": dict(load_history=history(volume=130_000.0)),
+          "short": dict(load_history=history(150)),
+          "earnings": dict(next_earnings=date(2026, 10, 28)), None: {}}[over]
+    doc, md = base_result(monkeypatch, tmp_path, argv=argv, **kw)
+    assert doc["leaf_id"] == leaf and HANDOFF_TITLE not in md
+    _assert_no_handoff(monkeypatch, doc)
+
+
+@pytest.mark.parametrize("only", ["hold", "wait_earnings", "no_options", "reduce_position"])
+def test_no_handoff_section_for_pick_without_delta(monkeypatch, tmp_path, only):
+    import strategy_pick_text as text
+    doc, _ = base_result(monkeypatch, tmp_path)
+    pick = {"strategy": only, "rank": 1, "delta_target": None, "reference_level": None,
+            "next_command": text.NEXT_COMMANDS[only].format(ticker="ZZZQ"), "flags": []}
+    _assert_no_handoff(monkeypatch, {**doc, "picks": [pick]})
+
+
+def test_section_position_between_table_and_caveats(monkeypatch, tmp_path):
+    _, md = base_result(monkeypatch, tmp_path)
+    conclusion = md.split("## 七步逐步表", 1)[0].split("\n")
+    title = conclusion.index(HANDOFF_TITLE)
+    assert conclusion[title - 2].startswith("| 2 | Bull Put 价差 |") and conclusion[title - 1] == ""
+    assert conclusion[title + 1] == "" and conclusion[title + 4] == ""
+    assert conclusion[title + 2] == ("- 现金担保 Put（短 Put 0.20）：`/put-screen suggest --dte "
+                                     "monthly --tickers ZZZQ`（目标 0.20，价差过宽时往外最多到 0.10）")
+    assert conclusion[title + 3] == ("- Bull Put 价差（短 Put 0.20）：先 `/spread-sim suggest ZZZQ`，"
+                                     "再 `open ZZZQ 0.20`")
+    assert conclusion[title + 5] == "下一步命令有自己的规则，可能把这只票剔掉："
+    assert md.count(HANDOFF_TITLE) == 1
+
+
+def test_section_delta_text_equals_table_column(monkeypatch, tmp_path):
+    doc, md = base_result(monkeypatch, tmp_path, read_holding=_held())
+    assert [p["strategy"] for p in doc["picks"]] == ["covered_call"]
+    column = render._pick_row(doc["picks"][0])[2]
+    assert column == "短 Call 0.10–0.15"
+    line = next(s for s in md.split("\n") if s.startswith("- 备兑 Call（"))
+    assert line.startswith(f"- 备兑 Call（{column}）：`/call-screen suggest --dte monthly --delta 0.15`")
+    assert line.endswith("；它扫全部持股，`--delta` 对这次扫的每只持股都生效")
+    assert f"的限制：{CC_CAVEAT}" in md
+
+
+def test_console_handoff_follows_pick_line(monkeypatch, tmp_path):
+    doc, md = base_result(monkeypatch, tmp_path)
+    lines = render.render_console(doc, tmp_path / "a.md", tmp_path / "a.json").split("\n")
+    at = [i for i, s in enumerate(lines) if s.startswith(HANDOFF_PREFIX)]
+    assert [lines[i - 1][:5] for i in at] == ["  1. ", "  2. "]
+    section = [s for s in md.split("\n") if s.startswith("- ") and "）：" in s][:2]
+    assert [lines[i][len(HANDOFF_PREFIX):] for i in at] == [s.split("）：", 1)[1] for s in section]
+
+
+def test_console_handoff_only_for_picks_with_delta(monkeypatch, tmp_path):
+    from datetime import date
+    doc, md = base_result(monkeypatch, tmp_path, argv=("ZZZQ", "--class", "hot"),
+                          next_earnings=date(2026, 10, 28), read_holding=_held())
+    assert [p["strategy"] for p in doc["picks"]] == ["wait_earnings", "covered_call"]
+    lines = render.render_console(doc, tmp_path / "a.md", tmp_path / "a.json").split("\n")
+    at = [i for i, s in enumerate(lines) if s.startswith(HANDOFF_PREFIX)]
+    assert len(at) == 1 and lines[at[0] - 1].startswith("  2. 备兑 Call")
+    section = md.split(HANDOFF_TITLE, 1)[1].split("\n\n")[1].split("\n")
+    assert len(section) == 1 and section[0].startswith("- 备兑 Call（")
+
+
+def test_caveat_csp_mentions_wiki_bypass(monkeypatch, tmp_path):
+    import strategy_pick_text as text
+    assert text.NEXT_COMMAND_CAVEATS["cash_secured_put"] == CSP_CAVEAT
+    assert "不再读 wiki 的 Avoid / 复核中状态" in CSP_CAVEAT
+    assert text.NEXT_COMMAND_CAVEATS["covered_call"] == CC_CAVEAT
+    _, md = base_result(monkeypatch, tmp_path)
+    assert f"- 现金担保 Put：`/put-screen suggest --dte monthly` 的限制：{CSP_CAVEAT}" in md
+
+
+def test_handoff_does_not_import_render():
+    import ast
+    import inspect
+    import strategy_pick_handoff as handoff
+    tree = ast.parse(inspect.getsource(handoff))
+    names = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    names |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+    assert "strategy_pick_render" not in names
+    assert "strategy_pick_handoff" in inspect.getsource(render)

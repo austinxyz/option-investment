@@ -86,7 +86,7 @@
    /strategy-pick SPY --view 中性 --class etf
    ```
 
-   `--view` 是你自己的看法（看好 / 中性 / 不看好），`--class etf` 告诉它这是 ETF。它会推荐 1–2 个策略和下一步该用的命令，报告（`.md`、`.json` 和同名 `.svg` 路径图）写进 `data/strategy-picks/`（演示模式写进 `data/strategy-picks/demo/`）。
+   `--view` 是你自己的看法（看好 / 中性 / 不看好），`--class etf` 告诉它这是 ETF。它会推荐 1–2 个策略和下一步该用的命令，报告（`.md`、`.json` 和同名 `.svg` 路径图）写进 `data/strategy-picks/`（演示模式写进 `data/strategy-picks/demo/`）。报告和控制台还会写出"带过去"的命令（例如 `/put-screen suggest --dte monthly --tickers ZZZQ --delta 0.15`），照抄即可；`/put-screen`、`/call-screen` 的 `--delta` 可以改目标 Delta（0.05–0.40）。
 
    **可能出现"门槛出局"**：Yahoo 给的未平仓量（OI）数据有时偏小。如果某只标的没过门槛，报告会写明是哪一项没过，并写"不做期权建议"，下一步指向 `stock-review` 命令。这个命令属于原作者的股票系统，本项目没有，忽略即可。通常换一个流动性更好的标的，或者换成月度到期日，重跑就能解决；也可以直接跳到第 2 步，`/spread-sim` 不依赖这一步的结果。
 

@@ -10,7 +10,7 @@ Natural language or explicit. Parse into one of four actions:
 
 | Action | Example input | Script call |
 |--------|---------------|-------------|
-| suggest | "筛一遍 Sell Put" / "今天有哪些 put 可以卖" / "月度的" | `suggest [--dte weekly\|monthly] [--tickers A,B]` — 默认 weekly；标的来源按顺序取第一个非空的：`--tickers` > `wiki/tickers/*/overview.md` > `data/watchlist.txt`（每行 `代码 [🏦|🚀|⚡] [watch|avoid|under review]`，`#` 注释）；都没有则退出码 2、不写文件。不写账本。用户明确要月度才传 `--dte monthly` |
+| suggest | "筛一遍 Sell Put" / "今天有哪些 put 可以卖" / "月度的" | `suggest [--dte weekly\|monthly] [--tickers A,B] [--delta X]` — 默认 weekly；标的来源按顺序取第一个非空的：`--tickers` > `wiki/tickers/*/overview.md` > `data/watchlist.txt`（每行 `代码 [🏦|🚀|⚡] [watch|avoid|under review]`，`#` 注释）；都没有则退出码 2、不写文件。不写账本。用户明确要月度才传 `--dte monthly`。`--delta X` 改短 Put 的目标 Delta：0.05–0.40、最多两位小数（0.125、0.5 等直接拒绝，退出码 2），默认 0.20；买卖价差过宽时往外最多走到 0.10 或目标（取小者），所以目标 0.10 及以下不往外走。非默认时规则行和逐只候选 JSON（`target_delta`）会写明目标，`open` 把它记进账本的 `delta_target`。文件名不带 Delta，同一天换 `--delta` 重跑会覆盖当天的候选与汇总，与换 `--dte` 一样 |
 | open | "ZZZQ 开一张" / "ZZQB 2 张" | `open TICKER [--contracts N]` — 记录已保存的候选，默认 1 张 |
 | status | "看一下模拟盘" / "周中检查" | `status` |
 | close | "提前平仓 #3" | `close ID` |

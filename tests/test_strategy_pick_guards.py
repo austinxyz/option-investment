@@ -162,3 +162,36 @@ def test_command_doc_mentions_diagram_local_only():
     # Artifact is only ever named in a prohibition, never as an instruction to publish.
     for line in (s for s in text.splitlines() if "Artifact" in s):
         assert "不要发布成 Artifact" in line, line
+
+
+def _flat(text: str) -> str:
+    return re.sub(r"\s+", "", text)
+
+
+def test_command_doc_no_longer_says_put_screen_takes_no_ticker():
+    for name, text in (("command", _source(COMMAND_DOC)), ("guide", _source(GUIDE))):
+        assert "带过去" in text, name
+        for line in text.splitlines():
+            if "/put-screen" in line and "不接 ticker" in line:
+                # allowed only when the same line carves out /put-screen's --tickers
+                assert "--tickers" in line and line.index("--tickers") < line.index("不接 ticker"), (name, line)
+        assert "扫整个 wiki 列表、不接 ticker" not in text, name
+        assert "--tickers" in text, name
+
+
+def test_command_doc_relays_handoff_lines_and_limits():
+    text = _source(COMMAND_DOC)
+    for needle in ("下一步", "怎么带过去", "限制", "带过去：", "原样", "--tickers ZZZQ",
+                   "Avoid", "复核中", "Delta 目标带不过去", "参考价位"):
+        assert needle in text, needle
+
+
+def test_put_and_call_screen_docs_mention_delta():
+    for name in ("put-screen.md", "call-screen.md"):
+        text = _source(REPO_ROOT / ".claude" / "commands" / name)
+        assert "--delta" in text, name
+        assert "0.05–0.40" in text, name
+        assert "同一天换 `--delta` 重跑会覆盖" in text, name
+    guide = _source(GUIDE)
+    assert guide.count("--delta") >= 3
+    assert "--tickers ZZZQ" in guide

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import option_labels
 import strategy_pick_rules as R
+import strategy_pick_handoff as HO
 import strategy_pick_steps as S
 import strategy_pick_text as T
 from strategy_pick_text import (CLASS_ONLY_FLAG, FLAG_LABELS, HIDDEN_FLAGS,  # noqa: F401
@@ -42,6 +43,7 @@ PAGE_PREFIX = "wiki/options/strategies/"
 LINK_UP = "../../"  # report lives in data/strategy-picks/
 PSEUDO_CONSTANTS = frozenset({"ZERO", "MA200"})
 SHARE_FLAG = "portfolio_share="
+HANDOFF_PREFIX = "     带过去："  # console line under each pick that has a hand-off
 # Only a rounded share is written (whole percent), so the file cannot be used to back out the
 # portfolio value from the reference strike.
 SHARE_DECIMALS = 2
@@ -238,6 +240,11 @@ def _range_text(targets, digits: int) -> str:
     return "；".join(out)
 
 
+def _delta_text(targets) -> str:
+    """The "Delta 目标" column; the hand-off section quotes the same text."""
+    return _range_text(targets, 2)
+
+
 def _flag_text(flag: str) -> str:
     if flag.startswith(SHARE_FLAG):
         return f"现金担保 Put 资金占组合约 {S.pct(float(flag[len(SHARE_FLAG):]), 0)}"
@@ -245,7 +252,7 @@ def _flag_text(flag: str) -> str:
 
 
 def _pick_row(p: dict) -> tuple:
-    delta = _range_text(p["delta_target"], 2) if p["delta_target"] else "—"
+    delta = _delta_text(p["delta_target"]) if p["delta_target"] else "—"
     if p["reference_level"]:
         ref = "≈ " + _range_text(p["reference_level"], 2)
     else:
@@ -264,6 +271,8 @@ def _conclusion(result: dict) -> list[str]:
         lines += ["**不做期权建议**：历史不足 200 个交易日，算不出 MA200，不分类、不给策略。", ""]
     lines += S.table(("排名", "策略", "Delta 目标", "参考价位（粗略）", "下一步", "说明"),
                      [_pick_row(p) for p in result["picks"]])
+    section = HO.handoff_lines(result, _delta_text)
+    lines += ["", *section[:-1]] if section else []  # its closing blank = the caveats' opening one
     caveats = [f"- {T.STRATEGY_LABELS[p['strategy']]}：`{p['next_command']}` 的限制："
                f"{T.NEXT_COMMAND_CAVEATS[p['strategy']]}"
                for p in result["picks"] if p["strategy"] in T.NEXT_COMMAND_CAVEATS]
@@ -368,6 +377,8 @@ def render_console(result: dict, md_path: Path, json_path: Path,
     for p in result["picks"]:
         row = _pick_row(p)
         lines.append(f"  {row[0]}. {row[1]}｜Delta {row[2]}｜参考 {row[3]}｜下一步 {row[4]}")
+        body = HO.handoff_body(p, result["ticker"])
+        lines += [HANDOFF_PREFIX + body] if body is not None else []
     iv_text = (f"{S.pct(iv['percentile'])}（{S.IV_LABELS[iv['label']]}，代理）"
                if iv["percentile"] is not None else "未计算")
     lines += [f"关键数字：R1y {S.signed_pct(m['r1y'])}｜RV1y {S.pct(m['rv1y'])}｜"
