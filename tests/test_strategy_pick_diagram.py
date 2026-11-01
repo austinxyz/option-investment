@@ -480,14 +480,68 @@ def test_history_short_chain(monkeypatch, tmp_path):
     assert "全部通过" in on and "交易日 150 <" in on
 
 
+def _leaf_by_id(root, leaf_id: str):
+    return next(g for g in root.iter(G_TAG) if g.get("data-leaves") == leaf_id)
+
+
+def test_bear_spread_colour_families():
+    # A mixed leaf takes its colour from the FIRST pick: bear.held starts with reduce_position.
+    assert D.STRATEGY_FAMILY["bear_put_spread"] == "buy"
+    assert D.STRATEGY_FAMILY["bear_call_spread"] == "sell"
+    assert D.leaf_family(R.LEAF_TABLE["bear.held"][0]) == "neutral"
+    assert D.leaf_family(R.LEAF_TABLE["bear.not_held"][0]) == "buy"
+
+
 def test_bear_held_v7(monkeypatch, tmp_path):
     doc, _ = _case(monkeypatch, tmp_path, "V7")
-    assert D.leaf_lines(doc)[0] == "① 考虑减仓   ② Collar"
+    lines = D.leaf_lines(doc)
+    assert lines[0] == "① 考虑减仓   ② Bear Put 价差"
+    # Only the first pick with a Delta target (the Bear Put long leg) gets a reference line.
+    assert lines[1] == "参考长 Put ≈ 100.00（粗略）"
+    assert lines[2:] == (T.WARN["bear_held"],)
     root = _root(D.render_svg(doc))
     leaf, = [g for g in _on_boxes(root) if g.get("data-leaves")]
+    assert leaf.get("data-leaves") == "bear.held"
+    # Mixed leaf: reduce_position (neutral) is first, so the box stays neutral grey.
     assert leaf.find(f"{SVG_NS}rect").get("fill") == V.COLORS["neutral"].fill == "#efeeea"
-    assert "① 考虑减仓   ② Collar" in _texts(leaf)
+    texts = _texts(leaf)
+    assert "① 考虑减仓   ② Bear Put 价差" in texts and "参考长 Put ≈ 100.00（粗略）" in texts
+    assert not any("短 Call" in t for t in texts)
+    # The off-path bear.not_held band reads its picks from LEAF_TABLE: buy colour, two picks.
+    other = _leaf_by_id(root, "bear.not_held")
+    assert other.find(f"{SVG_NS}rect").get("fill") == V.COLORS["buy"].fill
+    assert "① Bear Put 价差   ② Bear Call 价差" in _texts(other)
     assert not any(re.search(r"(?<![A-Za-z\d.])150(?![\d%])", t) for t in _texts(root))
+
+
+def test_bear_run_warnings_not_on_leaf_box(monkeypatch, tmp_path):
+    # bear_against_trend / bear_put_iv_high / bear_drift are run warnings, not leaf-table
+    # warnings: the report lists them, the leaf box draws only the leaf's own warning.
+    doc, _ = _case(monkeypatch, tmp_path, "V7")
+    run_warns = [T.WARN[k] for k in ("bear_against_trend", "bear_put_iv_high", "bear_drift")]
+    assert set(run_warns) <= set(doc["warnings"])
+    on = " ".join(_on_texts(_root(D.render_svg(doc))))
+    for text in run_warns:
+        assert text not in on
+
+
+def test_bear_not_held_two_picks(monkeypatch, tmp_path):
+    doc, _ = _case(monkeypatch, tmp_path, "bear_no_lot")
+    assert doc["leaf_id"] == "bear.not_held"
+    lines = D.leaf_lines(doc)
+    assert lines[0] == "① Bear Put 价差   ② Bear Call 价差"
+    assert lines[1] == "参考长 Put ≈ 100.00（粗略）"
+    assert T.WARN["bear_not_held"] in lines
+    root = _root(D.render_svg(doc))
+    leaf, = [g for g in _on_boxes(root) if g.get("data-leaves")]
+    assert leaf.get("data-leaves") == "bear.not_held"
+    # On-path box colour is the path fill for decision nodes only; leaf keeps its family fill.
+    assert leaf.find(f"{SVG_NS}rect").get("fill") == V.COLORS["buy"].fill == "#e4f6ee"
+    assert "参考长 Put ≈ 100.00（粗略）" in _texts(leaf)
+    assert not any("短 Call ≈" in t for t in _texts(leaf))
+    other = _leaf_by_id(root, "bear.held")
+    assert other.find(f"{SVG_NS}rect").get("fill") == V.COLORS["neutral"].fill
+    assert "① 考虑减仓   ② Bear Put 价差" in _texts(other)
 
 
 def test_bear_not_held_held_no_lot_no_collar(monkeypatch, tmp_path):
@@ -737,10 +791,58 @@ def _seq(texts: list[str], *lines: str) -> bool:
     ("V1", ("看好", "已持有", "来源：wiki")),
     ("bear_no_lot", ("持股不足", "100 股")),
     ("base", ("① 只在真想接股时做；", "远价外（Delta 0.10–0.15）")),
-    ("V7", ("参考长 Put ≈ 92.56–95.39；", "短 Call ≈ 107.44（粗略）")),
+    ("V7", ("考虑减仓（/stock-review、/stock-exit），", "或 Bear Put 价差（/bearput-sim），")),
     ("V8", ("财报 5 天内，", "先等财报（原第二 现金担保 Put 让位）")),
     ("hot", ("类别 热门赛道热门股不在优先类", "→ Bull Put 价差 排前")),
 ])
 def test_six_awkward_wraps_fixed(monkeypatch, tmp_path, name, lines):
     doc, _ = _case(monkeypatch, tmp_path, name)
     assert _seq(_texts(_root(D.render_svg(doc))), *lines)
+
+
+# Bear spreads on the decision path: every bear run writes its .svg, never the failure notice.
+
+_AVOID = thesis(status="avoid")
+_HOT_SOON = dict(argv=("ZZZQ", "--class", "hot"), next_earnings=date(2026, 10, 28))
+BEAR_CLI_CASES = {
+    "held": (dict(read_thesis=_AVOID, read_holding=_rows(150)), "bear.held"),
+    "not_held": (dict(read_thesis=_AVOID), "bear.not_held"),
+    "no_lot": (dict(read_thesis=_AVOID, read_holding=_rows(60, 50)), "bear.not_held"),
+    "gate_fail": (dict(read_thesis=_AVOID, load_history=history(volume=130_000.0)),
+                  "gate_fail"),
+    "history_short": (dict(read_thesis=_AVOID, load_history=history(150)), "history_short"),
+    "hot_earnings_not_held": (dict(read_thesis=_AVOID, **_HOT_SOON), "bear.not_held"),
+    "hot_earnings_held": (dict(read_thesis=_AVOID, read_holding=_rows(150), **_HOT_SOON),
+                          "bear.held"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(BEAR_CLI_CASES))
+def test_bear_cli_run_writes_svg(monkeypatch, tmp_path, capsys, name):
+    over, leaf = BEAR_CLI_CASES[name]
+    over = dict(over)
+    argv = list(over.pop("argv", ("ZZZQ",)))
+    install(monkeypatch, tmp_path, **over)
+    assert run(argv) == 0
+    err = capsys.readouterr().err
+    assert "路径图生成失败" not in err
+    md, js = outputs(tmp_path)
+    doc = json.loads(js.read_text(encoding="utf-8"))
+    assert doc["leaf_id"] == leaf
+    svg = md.with_suffix(".svg")
+    assert svg.exists()
+    root = _root(svg.read_text(encoding="utf-8"))
+    assert not any(t.endswith("…") for t in _texts(root))
+
+
+def test_bear_hot_earnings_not_held_leaf_box(monkeypatch, tmp_path):
+    doc, _ = _case(monkeypatch, tmp_path, "V8", read_thesis=_AVOID)
+    assert [p["strategy"] for p in doc["picks"]] == ["wait_earnings", "bear_put_spread"]
+    lines = D.leaf_lines(doc)
+    assert lines[0] == "① 等财报后再看   ② Bear Put 价差"
+    assert "参考长 Put ≈ 100.00（粗略）" in lines
+    assert "财报 5 天内，先等财报（原第二 Bear Call 价差 让位）" in lines
+    assert "叶子表：Bear Put 价差 + Bear Call 价差" in lines
+    # Box colour follows the leaf table's first pick (as for bull V8), not the earnings swap.
+    leaf, = [g for g in _on_boxes(_root(D.render_svg(doc))) if g.get("data-leaves")]
+    assert leaf.find(f"{SVG_NS}rect").get("fill") == V.COLORS["buy"].fill

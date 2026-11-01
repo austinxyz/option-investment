@@ -40,6 +40,11 @@ EXPECTED = {
     ("covered_call", "call_far"): ("/call-screen suggest --dte monthly --delta 0.15", ()),
     ("collar", "collar"): ("/collar-screen suggest", ()),
     ("protective_put", "protective"): ("/collar-screen suggest", ()),
+    # Bear Put long put 0.50-0.60 in 0.60/0.50/0.40; Bear Call short call 0.10-0.15 in 0.10/0.15/0.20
+    ("bear_put_spread", "bearput"):
+        (f"/bearput-sim suggest {T}", (f"open {T} 0.60", f"open {T} 0.50")),
+    ("bear_call_spread", "bearcall"):
+        (f"/bearcall-sim suggest {T}", (f"open {T} 0.15", f"open {T} 0.10")),
 }
 
 

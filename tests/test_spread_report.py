@@ -810,7 +810,7 @@ def test_private_peak_includes_collar_debit_public_peak_does_not():
     priv = rep.render_report([spread, pput], None, "2026-10-21")
     assert "历史最大同时占用资金 $650" in priv
     pub = rep.render_public_report([spread, pput], {}, "2026-10-24")
-    assert "历史最大同时占用资金 $500" in pub
+    assert "| 历史最大同时占用资金 | $500（2026-10-20 起） |" in pub
     assert pub == rep.render_public_report([spread], {}, "2026-10-24")
 
 
@@ -894,9 +894,11 @@ def _all_old_ledger():
 
 PIN_PRIVATE = "12c81e45e5f4c26986f1d4c04a917d5ddfd50bf3e6ec6e3d13594ed736b78f87"
 PIN_BROKER = "d42599b0856fe881ea8eac4737abe59da7381f91c6482ae780863277b2728f40"
-PIN_PUBLIC = "8eae3c156a03e8ffef95ab943aca4450d9ee19a1fe61a911c73a2be4cd9f8147"
+# Public pins re-captured on purpose (2026-10-27): the page is now built from the paper-book
+# layers (paper_book_public); the private pins above are unchanged.
+PIN_PUBLIC = "b350eee0386cfe885a7fb3dfb2ce92c1118cbd6188cdf579add6c19f36e7d501"
 # Same page without the edition-driven front matter (Task 9), so both editions pin the body.
-PIN_PUBLIC_BODY = "ae7b12453d0bbe3f084e48029e947109e1bceec12f4f3875fd8d04f162f8b690"
+PIN_PUBLIC_BODY = "ba28ce142d9669cb6b056843b7a3b7afe3182470dbbe7fc6d801fe5f3649ed80"
 
 
 def _sha(text: str) -> str:
@@ -1110,7 +1112,7 @@ def test_existing_report_output_unchanged_for_six_old_strategies():
     assert _sha(spread_html.render_report_html(recs, SIX_MARKS, "2026-10-21")) == PIN6_HTML
 
 
-BULLCALL_SECRETS = ("ZQBC", "101.9", "1.9", "310", "bull_call_spread", "Call 借方价差", "100/105")
+BULLCALL_SECRETS = ("ZQBC", "101.9", "$1.9", "1.90", "310", "bull_call_spread", "Call 借方价差", "100/105")
 
 
 def test_public_report_unchanged_with_bullcall_records_present():

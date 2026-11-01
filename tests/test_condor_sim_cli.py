@@ -459,3 +459,64 @@ def test_condor_sim_imports_no_broker_modules():
     source += (REPO_ROOT / "scripts" / "condor_sim_render.py").read_text(encoding="utf-8")
     for name in ("broker_", "placeOrder", "ib_async"):
         assert name not in source
+
+
+# --- open --from-pick (today's /strategy-pick result) ----------------------------------------------
+from datetime import timedelta
+
+from frompick_fixtures import use_folder, write_pick
+
+
+@pytest.fixture
+def picks(monkeypatch, tmp_path):
+    return use_folder(monkeypatch, tmp_path / "picks")
+
+
+def test_open_needs_bucket_or_from_pick(env, picks, capsys):
+    assert run(env, "suggest", "ZZZQ", "--width", "5") == 0
+    with pytest.raises(SystemExit) as exc:
+        run(env, "open", "ZZZQ")
+    assert exc.value.code == 2
+    assert "open 需要档位" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc:
+        run(env, "open", "ZZZQ", "0.15", "--from-pick")
+    assert exc.value.code == 2
+    assert "档位和 --from-pick 只能二选一" in capsys.readouterr().err
+    assert not (env['ledger'] / 'spreads.json').exists()
+
+
+@pytest.mark.parametrize("case", ["missing", "older_file", "stale_run_date", "other_strategy"])
+def test_open_from_pick_refusal_exit_2_writes_nothing(env, picks, capsys, case):
+    assert run(env, "suggest", "ZZZQ", "--width", "5") == 0
+    yesterday = SNAP - timedelta(days=1)
+    if case == "older_file":
+        write_pick(picks, "ZZZQ", yesterday, "iron_condor", 0.15, 0.15)
+    elif case == "stale_run_date":
+        write_pick(picks, "ZZZQ", yesterday, "iron_condor", 0.15, 0.15, file_date=SNAP)
+    elif case == "other_strategy":
+        write_pick(picks, "ZZZQ", SNAP, "bull_put_spread", 0.15, 0.15)
+    capsys.readouterr()
+    assert run(env, "open", "zzzq", "--from-pick") == 2
+    out, err = capsys.readouterr()
+    assert out == "" and err.startswith("错误：")
+    assert not (env['ledger'] / 'spreads.json').exists()
+
+
+def test_open_from_pick_records_the_mapped_bucket(env, picks, capsys):
+    assert run(env, "suggest", "ZZZQ", "--width", "5") == 0
+    write_pick(picks, "ZZZQ", SNAP, "iron_condor", 0.15, 0.15)
+    capsys.readouterr()
+    assert run(env, "open", "zzzq", "--from-pick", "--contracts", "2") == 0
+    (s,) = ledger(env)["spreads"]
+    assert s["delta_bucket"] == 0.15 and s["contracts"] == 2
+    target = "0.15" if 0.15 == 0.15 else "0.15–0.15"
+    line = f"按 /strategy-pick {SNAP.isoformat()} 的结果：Delta 目标 {target} → 档位 0.15"
+    assert line in capsys.readouterr().out.splitlines()
+
+
+def test_open_from_pick_keeps_width_check(env, picks, capsys):
+    assert run(env, "suggest", "ZZZQ", "--width", "5") == 0
+    write_pick(picks, "ZZZQ", SNAP, "iron_condor", 0.15, 0.15)
+    assert run(env, "open", "ZZZQ", "--from-pick", "--width", "7") == 1
+    assert "--width 7" in capsys.readouterr().err
+    assert not (env['ledger'] / 'spreads.json').exists()

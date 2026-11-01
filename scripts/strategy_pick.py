@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""/strategy-pick TICKER: pick 1-2 bullish or neutral option strategies, with every number shown.
+"""/strategy-pick TICKER: pick 1-2 option strategies for the view, with every number shown.
+
+Bull / neutral views get bullish or neutral strategies; the bear view gets the bear put and bear
+call spreads (or reducing a held lot first), see 2026-10-30-strategy-pick-bearish-design.md.
 
     ./.venv/Scripts/python.exe scripts/strategy_pick.py TICKER [--view 看好|中性|不看好] \
         [--class bluechip|hot|etf]

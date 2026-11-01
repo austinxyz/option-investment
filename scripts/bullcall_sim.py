@@ -5,6 +5,7 @@
         # saves suggestions/<snapshot>-<TICKER>-bullcall.{md,json} and bullcall-sim/<snapshot>.md
         # (no ledger write)
     bullcall_sim.py open TICKER {0.60,0.50,0.40} [--contracts N] [--width W]
+    bullcall_sim.py open TICKER --from-pick [...]   # bucket from today's /strategy-pick
         # records the saved candidate verbatim
     bullcall_sim.py status | close ID       # shared with spread_sim
 
@@ -34,6 +35,7 @@ import option_settings
 import spread_data
 import spread_ledger as ledger_mod
 import spread_sim
+import strategy_pick_frompick as frompick
 
 SUGGESTIONS_DIR = "suggestions"
 SUMMARY_DIR = "bullcall-sim"
@@ -415,7 +417,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"到期日距快照日的最少天数（默认 {core.BULLCALL_MIN_DAYS}，最小 {MIN_DAYS_FLOOR}）")
     o = sub.add_parser("open", help="记录已保存候选里的一档")
     o.add_argument("ticker", type=spread_sim._ticker_arg)
-    o.add_argument("bucket", type=float, choices=core.BULLCALL_DELTA_BUCKETS)
+    o.add_argument("bucket", type=float, choices=core.BULLCALL_DELTA_BUCKETS, nargs="?",
+                   default=None)
+    o.add_argument("--from-pick", action="store_true",
+                   help="档位用今天 /strategy-pick TICKER 的 Bull Call 价差推荐（与档位二选一）")
     o.add_argument("--contracts", type=spread_sim._positive_int, default=1)
     o.add_argument("--width", type=spread_sim._positive_float, default=None,
                    help="只用于核对，必须与已保存候选的宽度一致")
@@ -426,15 +431,36 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"suggest": cmd_suggest, "open": cmd_open, "status": cmd_status, "close": cmd_close}
+FROM_PICK_STRATEGY = "bull_call_spread"
+
+
+def _from_pick(args, today: date) -> str | None:
+    """Fill the bucket from today's pick; the console line, or None."""
+    if not getattr(args, "from_pick", False):
+        return None
+    args.bucket, line = frompick.open_from_pick(args.ticker, FROM_PICK_STRATEGY, today)
+    return line
 
 
 def main(argv: list[str] | None = None, today: date | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    frompick.check_open_args(parser, args)
     if (error := _width_precision_error(getattr(args, "width", None))):
         print(f"错误：{error}", file=sys.stderr)
         return 2
     try:
+        pick_line = _from_pick(args, today or date.today())
+    except frompick.FromPickError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return frompick.EXIT_FROM_PICK
+    except ibkr_session.SettingsError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 1
+    try:
         option_labels.print_console_header()
+        if pick_line:
+            print(pick_line)
         ledger_dir = spread_sim.resolve_ledger_dir(args.ledger_dir)
         return COMMANDS[args.cmd](args, ledger_dir, today or date.today())
     except (spread_data.DataError, ledger_mod.LedgerError, ibkr_session.SettingsError) as exc:

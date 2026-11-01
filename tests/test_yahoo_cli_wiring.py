@@ -246,3 +246,140 @@ def test_bullcall_sim_cli_ibkr_rejects_wide_long_leg(monkeypatch, tmp_path):
     assert 108.0 not in asked  # a rejected long leg needs no short strike (kills a hard-wired 10%)
     assert "买卖价差 7.7% 超过 5%" in text
 
+
+# ---- bearcall-sim (the long leg strike request uses the hard limit) -------------------
+
+def _bearcall_row(k, pct=0.0):
+    import math
+    mid = {105.0: 2.10, 110.0: 0.90}.get(k, round(2.10 * math.exp(-0.17 * (k - 105)), 4))
+    half = max(0.01, mid * pct / 2)
+    return {"strike": k, "bid": round(mid - half, 4), "ask": round(mid + half, 4), "last": mid,
+            "iv": None, "delta": round(max(0.40 - (k - 100) / 20, 0.01), 4)}
+
+
+def _bearcall_sim(monkeypatch, tmp_path):
+    import bearcall_sim
+    _common(monkeypatch)
+    listed = [float(k) for k in range(90, 121)]
+    window = [float(k) for k in range(95, 111)]   # the 0.10 bucket's long leg (111) is outside
+    short_strike = 106.0                           # delta 0.10 bucket; its quote is 7.7% wide
+
+    asked: list[float] = []
+
+    def fetch_calls(t, e, strikes=(), window_pct=None, window_limit=None):
+        asked.extend(strikes)
+        wanted = sorted(set(window) | (set(strikes) & set(listed)))
+        return [_bearcall_row(k, PCT if k == short_strike else 0.0) for k in wanted]
+
+    monkeypatch.setattr(spread_data, "expirations", lambda t: ["2026-10-20", "2026-10-23"])
+    monkeypatch.setattr(spread_data, "fetch_calls", fetch_calls)
+    ledger = tmp_path / "ledger"
+    assert bearcall_sim.main(["--ledger-dir", str(ledger), "suggest", "ZQBR", "--width", "5"],
+                             today=SNAP) == 0
+    return short_strike, _texts(ledger), asked
+
+
+@pytest.mark.data_source("yahoo")
+def test_bearcall_sim_cli_yahoo_uses_wide_short_leg_and_fetches_long(monkeypatch, tmp_path):
+    short_strike, text, asked = _bearcall_sim(monkeypatch, tmp_path)
+    assert WARN_77 in text and f'"short_strike": {short_strike},' in text
+    assert 111.0 in asked  # the wide-but-allowed short leg's long strike was requested
+
+
+def test_bearcall_sim_cli_ibkr_rejects_wide_short_leg(monkeypatch, tmp_path):
+    short_strike, text, asked = _bearcall_sim(monkeypatch, tmp_path)
+    assert WARN_TEXT not in text and f'"short_strike": {short_strike},' not in text
+    assert 111.0 not in asked  # a rejected short leg needs no long strike (kills a hard-wired 10%)
+    assert "买卖价差 7.7% 超过 5%" in text
+
+
+# ---- bearput-sim (the short leg strike request uses the hard limit) -------------------
+
+def _bearput_row(k, pct=0.0):
+    import math
+    mid = {100.0: 4.80, 90.0: 1.80}.get(k, round(4.80 * math.exp(0.10 * (k - 100)), 4))
+    half = max(0.01, mid * pct / 2)
+    return {"strike": k, "bid": round(mid - half, 4), "ask": round(mid + half, 4), "last": mid,
+            "iv": None, "delta": -round(min(max(0.50 + (k - 100) / 50, 0.01), 0.99), 4)}
+
+
+def _bearput_sim(monkeypatch, tmp_path):
+    import bearput_sim
+    _common(monkeypatch)
+    listed = [float(k) for k in range(80, 121)]
+    window = [float(k) for k in range(88, 100)]   # the 0.40 bucket's short leg (85) is outside
+    long_strike = 95.0                             # delta 0.40 bucket; its quote is 7.7% wide
+
+    asked: list[float] = []
+
+    def fetch_puts(t, e, strikes=(), window_pct=None, window_limit=None):
+        asked.extend(strikes)
+        wanted = sorted(set(window) | (set(strikes) & set(listed)))
+        return [_bearput_row(k, PCT if k == long_strike else 0.0) for k in wanted]
+
+    monkeypatch.setattr(spread_data, "expirations",
+                        lambda t: ["2026-10-23", "2026-11-13", "2026-11-20", "2026-12-18"])
+    monkeypatch.setattr(spread_data, "fetch_puts", fetch_puts)
+    monkeypatch.setattr(spread_data, "chain_strikes", lambda t: listed)  # the ITM long-leg ask
+    ledger = tmp_path / "ledger"
+    assert bearput_sim.main(["--ledger-dir", str(ledger), "suggest", "ZQBP", "--width", "10"],
+                            today=SNAP) == 0
+    return long_strike, _texts(ledger), asked
+
+
+@pytest.mark.data_source("yahoo")
+def test_bearput_sim_cli_yahoo_uses_wide_long_leg_and_fetches_short(monkeypatch, tmp_path):
+    long_strike, text, asked = _bearput_sim(monkeypatch, tmp_path)
+    assert WARN_77 in text and f'"long_put_strike": {long_strike},' in text
+    assert 85.0 in asked  # the wide-but-allowed long leg's short strike was requested
+
+
+def test_bearput_sim_cli_ibkr_rejects_wide_long_leg(monkeypatch, tmp_path):
+    long_strike, text, asked = _bearput_sim(monkeypatch, tmp_path)
+    assert WARN_TEXT not in text and f'"long_put_strike": {long_strike},' not in text
+    assert 85.0 not in asked  # a rejected long leg needs no short strike (kills a hard-wired 10%)
+    assert "买卖价差 7.7% 超过 5%" in text
+
+
+
+# ---- longput-sim (single leg; the at-the-money ask is by strike, window-free) ---------
+
+def _longput_row(k, pct=0.0):
+    import math
+    mid = 2.40 if k == 95.0 else round(2.40 * math.exp(0.12 * (k - 95)), 4)
+    half = max(0.01, mid * pct / 2)
+    return {"strike": k, "bid": round(mid - half, 4), "ask": round(mid + half, 4), "last": mid,
+            "iv": None, "delta": -round(min(max(0.50 + (k - 100) / 50, 0.01), 0.99), 4)}
+
+
+def _longput_sim(monkeypatch, tmp_path):
+    import longput_sim
+    _common(monkeypatch)
+    listed = [float(k) for k in range(80, 121)]
+    window = [float(k) for k in range(88, 100)]
+    put_strike = 95.0                              # delta 0.40 bucket; its quote is 7.7% wide
+
+    def fetch_puts(t, e, strikes=(), window_pct=None, window_limit=None):
+        base = [] if (window_pct, window_limit) == (0, 0) else window
+        wanted = sorted(set(base) | (set(strikes) & set(listed)))
+        return [_longput_row(k, PCT if k == put_strike else 0.0) for k in wanted]
+
+    monkeypatch.setattr(spread_data, "expirations",
+                        lambda t: ["2026-10-23", "2026-11-13", "2026-11-20", "2026-12-18"])
+    monkeypatch.setattr(spread_data, "fetch_puts", fetch_puts)
+    monkeypatch.setattr(spread_data, "chain_strikes", lambda t: listed)  # the at-the-money ask
+    ledger = tmp_path / "ledger"
+    assert longput_sim.main(["--ledger-dir", str(ledger), "suggest", "ZQLP"], today=SNAP) == 0
+    return put_strike, _texts(ledger)
+
+
+@pytest.mark.data_source("yahoo")
+def test_longput_sim_cli_yahoo_uses_wide_put_with_warning(monkeypatch, tmp_path):
+    put_strike, text = _longput_sim(monkeypatch, tmp_path)
+    assert WARN_77 in text and f'"put_strike": {put_strike},' in text
+
+
+def test_longput_sim_cli_ibkr_rejects_wide_put(monkeypatch, tmp_path):
+    put_strike, text = _longput_sim(monkeypatch, tmp_path)
+    assert WARN_TEXT not in text and f'"put_strike": {put_strike},' not in text
+    assert "买卖价差 7.7% 超过 5%" in text

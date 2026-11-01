@@ -351,11 +351,18 @@ def test_thin_iv_flag_with_iv_high():
 
 
 def test_collar_ltcg_flag_and_bear_reduce_hint():
-    d = decide(ctx(view="bear", holding=holding_state([150], [False])))
-    assert d.leaf_id == "bear.held" and strategies(d) == ["reduce_position", "collar"]
-    assert "ltcg_reset" in pick(d, "collar").flags
+    short_ltcg = holding_state([150], [False])
+    for view, regime in (("bull", "high_vol"), ("neutral", "down")):  # Collar leaves
+        col = decide(ctx(view=view, regime=regime, holding=short_ltcg))
+        assert strategies(col) == ["collar"] and "ltcg_reset" in pick(col, "collar").flags
+        assert text.WARN["ltcg_reset"] in col.warnings
+    d = decide(ctx(view="bear", holding=short_ltcg))
+    assert d.leaf_id == "bear.held" and strategies(d) == ["reduce_position", "bear_put_spread"]
+    assert all("ltcg_reset" not in p.flags for p in d.picks)
+    assert text.WARN["ltcg_reset"] not in d.warnings
     nolot = decide(ctx(view="bear", holding=holding_state([60, 50], [True, True])))
-    assert nolot.leaf_id == "bear.not_held" and strategies(nolot) == ["no_options"]
+    assert nolot.leaf_id == "bear.not_held"
+    assert strategies(nolot) == ["bear_put_spread", "bear_call_spread"]
     assert "reduce_hint" in nolot.picks[0].flags
     assert reason(nolot, "collar") == "held_no_lot"
 

@@ -519,3 +519,75 @@ def test_open_rejects_damaged_target_delta(env, capsys, bad):
     assert run(env, "open", "AAA") == 1
     assert "suggest" in capsys.readouterr().err
     assert not (env["ledger"] / "spreads.json").exists()
+
+
+# --- --from-pick (today's /strategy-pick result) ---------------------------------------------------
+from datetime import timedelta
+
+from frompick_fixtures import use_folder, write_pick
+
+
+@pytest.fixture
+def picks(monkeypatch, tmp_path):
+    return use_folder(monkeypatch, tmp_path / "picks")
+
+
+@pytest.mark.parametrize("extra", [("--tickers", "AAA"), ("--delta", "0.15"), ("--delta", "0.20"),
+                                   ("--tickers", "AAA", "--delta", "0.2")])
+def test_from_pick_excludes_tickers_and_delta(env, picks, capsys, extra):
+    write_pick(picks, "AAA", TODAY, "cash_secured_put", 0.10, 0.15)
+    with pytest.raises(SystemExit) as exc:
+        run_raw(env, "suggest", "--from-pick", "AAA", *extra)
+    assert exc.value.code == 2
+    assert "--from-pick 不能和 --tickers / --delta 一起用" in capsys.readouterr().err
+    assert not env["ledger"].exists()
+
+
+def test_from_pick_bad_ticker_is_argparse_error(env, picks, capsys):
+    with pytest.raises(SystemExit) as exc:
+        run_raw(env, "suggest", "--from-pick", "../AAA")
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("case", ["missing", "older_file", "stale_run_date", "no_put_pick"])
+def test_from_pick_refusal_exit_2_touches_nothing(env, picks, capsys, case):
+    yesterday = TODAY - timedelta(days=1)
+    if case == "older_file":
+        write_pick(picks, "AAA", yesterday, "cash_secured_put", 0.10, 0.15)
+    elif case == "stale_run_date":
+        write_pick(picks, "AAA", yesterday, "cash_secured_put", 0.10, 0.15, file_date=TODAY)
+    elif case == "no_put_pick":
+        write_pick(picks, "AAA", TODAY, "bull_put_spread", 0.10, 0.15)
+    env["gateway"] = ibkr_session.GatewayUnavailable("不该连网关")  # refusal comes first
+    assert run_raw(env, "suggest", "--dte", "monthly", "--from-pick", "aaa") == 2
+    out, err = capsys.readouterr()
+    assert out == "" and err.startswith("错误：")
+    assert "/strategy-pick AAA" in err or "今天的推荐里没有 现金担保 Put" in err
+    assert not env["ledger"].exists()
+
+
+def test_from_pick_equals_manual_handoff(env, picks, capsys):
+    _add_ticker(env["wiki"], "BBB")  # a whole-universe run would screen BBB too
+    write_pick(picks, "AAA", TODAY, "cash_secured_put", 0.10, 0.15)
+    capsys.readouterr()
+    assert run_raw(env, "suggest", "--dte", "monthly", "--tickers", "AAA", "--delta", "0.15") == 0
+    manual, manual_out = _collect(env), capsys.readouterr().out
+    assert run_raw(env, "suggest", "--dte", "monthly", "--from-pick", "aaa") == 0
+    picked, picked_out = _collect(env), capsys.readouterr().out
+    assert picked == manual
+    line = "按 /strategy-pick 2026-10-18 的结果：Delta 目标 0.10–0.15 → --delta 0.15"
+    lines = picked_out.splitlines()
+    assert lines.count(line) == 1
+    lines.remove(line)
+    assert lines == manual_out.splitlines()  # exactly one extra console line
+    assert json.loads(manual[f"suggestions/{SNAP}-AAA-put.json"])["target_delta"] == 0.15
+    assert not any("BBB" in name for name in picked)
+
+
+def test_from_pick_default_target_matches_plain_run(env, picks, capsys):
+    write_pick(picks, "AAA", TODAY, "cash_secured_put", 0.20, 0.20)
+    capsys.readouterr()
+    assert run_raw(env, "suggest", "--dte", "monthly", "--tickers", "AAA") == 0
+    manual = _collect(env)
+    assert run_raw(env, "suggest", "--dte", "monthly", "--from-pick", "AAA") == 0
+    assert _collect(env) == manual

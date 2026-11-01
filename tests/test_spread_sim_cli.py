@@ -1538,3 +1538,389 @@ def test_existing_strategies_status_and_close_unchanged_alongside_bullcall(
     assert ledger(mixed)["spreads"][1]["status"] == "open"
     assert spread_sim._line(_condor_rec(id=4)) == "#4 ZZZQ 85/90/110/115 铁鹰 到期 2026-10-23"
     assert spread_sim._line(_bullcall_rec(id=5)) == "#5 ZZZQ 100/105 Call 借方价差 到期 2026-10-23"
+
+
+# ---- risk reversal records (ZZZQ, invented; design section 8) -------------------
+# Shared seed: sell 90 put @2.00, buy 110 call @1.50 -> net_credit +0.50/share, 1 contract.
+# Take-profit line +$200 (1.0 x 2.00 x 100), stop line -$400 (-2.0 x 2.00 x 100), inclusive.
+
+def _rr_rec(ticker="ZZZQ", contracts=1, expiry=EXPIRY, **extra):
+    return {
+        "strategy": "risk_reversal", "ticker": ticker, "contracts": contracts,
+        "snapshot_date": "2026-10-16", "expiry": expiry, "underlying_price": 100.0,
+        "suggestion_file": "2026-10-16-ZZZQ-rr.md",
+        "short_put_strike": 90.0, "long_call_strike": 110.0,
+        "short_put_mid": 2.00, "long_call_mid": 1.50, "net_credit": 0.50,
+        "breakeven_down": 89.5, "put_move_pct": -0.10, "call_move_pct": 0.10,
+        "delta_bucket": 0.20, "short_put_delta": 0.20, "long_call_delta": 0.15,
+        "short_put_iv": 0.40, "long_call_iv": 0.38, "earnings_in_window": False,
+        "status": "open", "exit_date": None, "exit_underlying": None,
+        "pnl": None, "result": None, "outcome_zone": None, **extra,
+    }
+
+
+def _seed_rr(tmp_path, *recs):
+    led = spread_ledger.empty_ledger()
+    for rec in recs or (_rr_rec(),):
+        led, _ = spread_ledger.add_spread(led, rec)
+    spread_ledger.save(tmp_path / "spreads.json", led)
+
+
+SELLER_AND_BUYER_HELPERS = (
+    "threshold_flags", "cost_to_close", "unrealized_pnl", "close_pnl", "expiry_pnl",
+    "breakeven_win_rate", "expiry_cost", "csp_expiry_pnl", "cc_expiry_pnl",
+    "csp_threshold_flags", "collar_unrealized_pnl", "collar_close_pnl",
+    "collar_expiry_option_pnl", "condor_cost_to_close", "condor_unrealized_pnl",
+    "condor_close_pnl", "condor_expiry_pnl", "bullcall_close_value", "bullcall_pnl",
+    "bullcall_expiry_value", "bullcall_threshold_flags", "bullcall_fraction_captured",
+    "bullcall_unrealized_pnl", "bullcall_max_loss")
+
+
+@pytest.fixture
+def rr_market(market, monkeypatch):
+    """Put 1.20 / call 3.00 by default (early close = +$230); no seller/buyer helper reachable."""
+    monkeypatch.setattr(spread_data, "fetch_calls", lambda t, e, strikes=(): market["calls"])
+    market["puts"] = _legs((90.0, 1.20))
+    market["calls"] = _legs((110.0, 3.00))
+    market["spot"] = 100.0
+
+    def boom(*a, **k):
+        raise AssertionError("seller / bull call helper used for a risk reversal")
+    for name in SELLER_AND_BUYER_HELPERS:
+        if hasattr(spread_sim.core, name):
+            monkeypatch.setattr(spread_sim.core, name, boom)
+    return market
+
+
+def _settle_rr(market, tmp_path, close, **rec):
+    _seed_rr(tmp_path, _rr_rec(**rec))
+    market["closes"][date.fromisoformat(EXPIRY)] = close
+    assert run(tmp_path, "status", today=date(2026, 10, 26)) == 0
+    return ledger(tmp_path)["spreads"][0]
+
+
+def test_status_marks_rr_with_put_and_call_chains(rr_market, tmp_path, capsys, monkeypatch,
+                                                  no_report):
+    seen = {"puts": [], "calls": []}
+    monkeypatch.setattr(spread_data, "fetch_puts", lambda t, e, strikes=():
+                        seen["puts"].append(tuple(strikes)) or rr_market["puts"])
+    monkeypatch.setattr(spread_data, "fetch_calls", lambda t, e, strikes=():
+                        seen["calls"].append(tuple(strikes)) or rr_market["calls"])
+    _seed_rr(tmp_path)
+    assert run(tmp_path, "status", today=date(2026, 10, 20)) == 0
+    out = capsys.readouterr().out
+    # exit_net 1.20 - 3.00 = -1.80 -> (0.50 + 1.80) x 100 = +$230; value held +1.80/share
+    assert ("#1 ZZZQ 90 Put 卖 / 110 Call 买 风险反转 到期 2026-10-23：净收入 $0.50/股，"
+            "持仓价值 $1.80/股，浮盈亏 +$230，距 Put 行权价 10.0%，距 Call 行权价 10.0%，"
+            "🟢 已到止盈线（浮盈≥短 Put 权利金的1倍）") in out    # +$230 >= the +$200 line
+    assert "止损" not in out
+    assert seen == {"puts": [(90.0,)], "calls": [(110.0,)]}
+    m = spread_sim._mark(ledger(tmp_path)["spreads"][0])
+    assert m["exit_net"] == pytest.approx(-1.80) and m["pnl"] == pytest.approx(230.0)
+    assert m["put_mid"] == pytest.approx(1.20) and m["call_mid"] == pytest.approx(3.00)
+    assert m["flags"] == {"stop": False, "take_profit": True} and m["stale"] is False
+    assert ledger(tmp_path)["spreads"][0]["status"] == "open"
+
+
+def test_status_rr_net_debit_label(rr_market, tmp_path, capsys, no_report):
+    _seed_rr(tmp_path, _rr_rec(short_put_mid=1.20, long_call_mid=1.80, net_credit=-0.60))
+    assert run(tmp_path, "status", today=date(2026, 10, 20)) == 0
+    out = capsys.readouterr().out
+    assert "净支出 $0.60/股" in out and "净收入" not in out
+
+
+def test_status_rr_negative_position_value_and_distances(rr_market, tmp_path, capsys, no_report):
+    _seed_rr(tmp_path)
+    rr_market["puts"], rr_market["calls"] = _legs((90.0, 6.00)), _legs((110.0, 0.40))
+    rr_market["spot"] = 88.0   # past the put strike
+    assert run(tmp_path, "status", today=date(2026, 10, 20)) == 0
+    out = capsys.readouterr().out
+    assert "持仓价值 -$5.60/股" in out and "浮盈亏 -$510" in out
+    assert "距 Put 行权价 -2.3%" in out and "距 Call 行权价 25.0%" in out
+
+
+@pytest.mark.parametrize("empty", ["puts", "calls"])
+def test_status_rr_missing_leg_reports_no_quote(rr_market, tmp_path, capsys, no_report, empty):
+    _seed_rr(tmp_path)
+    rr_market[empty] = []
+    assert run(tmp_path, "status", today=date(2026, 10, 20)) == 0
+    out = capsys.readouterr().out
+    assert "取不到报价" in out or "找不到" in out
+    assert "浮盈亏" not in out
+    assert set(spread_sim._mark(ledger(tmp_path)["spreads"][0])) == {"error"}
+    assert ledger(tmp_path)["spreads"][0]["status"] == "open"
+
+
+@pytest.mark.parametrize("put_mid,call_mid,pnl,take_profit", [
+    (1.00, 3.00, 250.0, True),     # (0.50 + 2.00) x 100: past the +$200 line
+    (1.50, 3.00, 200.0, True),     # exactly +$200: take profit is inclusive
+    (1.60, 3.00, 190.0, False),    # one step short
+])
+def test_status_rr_take_profit_boundary(rr_market, tmp_path, capsys, no_report,
+                                        put_mid, call_mid, pnl, take_profit):
+    _seed_rr(tmp_path)
+    rr_market["puts"], rr_market["calls"] = _legs((90.0, put_mid)), _legs((110.0, call_mid))
+    assert run(tmp_path, "status", today=date(2026, 10, 20)) == 0
+    out = capsys.readouterr().out
+    assert f"浮盈亏 +${pnl:,.0f}" in out
+    assert ("已到止盈线" in out) is take_profit and "已到止损线" not in out
+
+
+@pytest.mark.parametrize("put_mid,pnl,stop", [
+    (4.90, -390.0, False),   # exit_net 4.40 -> (0.50 - 4.40) x 100: short of -$400
+    (5.00, -400.0, True),    # exactly -$400: stop is inclusive
+    (5.10, -410.0, True),
+])
+def test_status_rr_stop_boundary(rr_market, tmp_path, capsys, no_report, put_mid, pnl, stop):
+    _seed_rr(tmp_path)
+    rr_market["puts"], rr_market["calls"] = _legs((90.0, put_mid)), _legs((110.0, 0.50))
+    assert run(tmp_path, "status", today=date(2026, 10, 20)) == 0
+    out = capsys.readouterr().out
+    assert f"浮盈亏 -${abs(pnl):,.0f}" in out
+    assert ("已到止损线" in out) is stop and "已到止盈线" not in out
+    if stop:
+        assert "已到止损线（浮亏≥短 Put 权利金的2倍）" in out
+
+
+@pytest.mark.parametrize("close,pnl,result,zone", [
+    (120.0, 1050.0, "win", "up"),
+    (110.0, 50.0, "win", "dead"),
+    (100.0, 50.0, "win", "dead"),
+    (90.0, 50.0, "win", "dead"),
+    (89.5, 0.0, "loss", "down"),
+    (80.0, -950.0, "loss", "down"),
+])
+def test_settle_rr_design_table(rr_market, tmp_path, capsys, no_report, close, pnl, result, zone):
+    s = _settle_rr(rr_market, tmp_path, close)
+    assert s["status"] == "expired" and s["exit_date"] == EXPIRY and s["exit_underlying"] == close
+    assert s["pnl"] == pytest.approx(pnl) and s["result"] == result and s["outcome_zone"] == zone
+    if pnl == 0:
+        assert str(s["pnl"]) == "0.0"
+    out = capsys.readouterr().out
+    assert "已到期结算" in out and "-$0" not in out
+    hint = "Put 价内，真实情况下会按行权价接股；本工具不模拟股票腿"
+    assert (hint in out) is (zone == "down")
+
+
+def test_settle_rr_two_contracts_up(rr_market, tmp_path, no_report):
+    s = _settle_rr(rr_market, tmp_path, 120.0, contracts=2)
+    assert s["pnl"] == pytest.approx(2100.0) and s["outcome_zone"] == "up"
+
+
+def test_settle_rr_writes_only_its_own_fields(rr_market, tmp_path, no_report):
+    s = _settle_rr(rr_market, tmp_path, 100.0)
+    for key in ("exit_cost", "breached_side", "credit", "short_strike", "long_strike", "width",
+                "debit", "lot_ref", "stock_leg_pnl", "exit_value", "fraction_of_max_captured"):
+        assert key not in s
+
+
+def test_rr_waits_on_expiry_day(rr_market, tmp_path, capsys, no_report):
+    _seed_rr(tmp_path)
+    rr_market["closes"][date.fromisoformat(EXPIRY)] = 120.0
+    assert run(tmp_path, "status", today=date.fromisoformat(EXPIRY)) == 0
+    assert ledger(tmp_path)["spreads"][0]["status"] == "open"
+    assert "次日或之后再运行" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("put_mid,call_mid,pnl,result", [
+    (1.20, 3.00, 230.0, "win"),
+    (6.00, 0.40, -510.0, "loss"),
+])
+def test_close_rr_uses_two_mids_unclamped(rr_market, tmp_path, capsys, no_report,
+                                          put_mid, call_mid, pnl, result):
+    _seed_rr(tmp_path)
+    rr_market["puts"], rr_market["calls"] = _legs((90.0, put_mid)), _legs((110.0, call_mid))
+    assert run(tmp_path, "close", "1", today=date(2026, 10, 20)) == 0
+    (s,) = ledger(tmp_path)["spreads"]
+    assert s["status"] == "closed_early" and s["exit_date"] == "2026-10-20"
+    assert s["pnl"] == pytest.approx(pnl) and s["result"] == result
+    assert s["exit_short_put_mid"] == pytest.approx(put_mid)
+    assert s["exit_long_call_mid"] == pytest.approx(call_mid)
+    assert s["exit_short_put_iv"] == 0.4 and s["exit_long_call_iv"] == 0.4
+    assert s["exit_underlying"] == 100.0 and s["outcome_zone"] is None
+    for key in ("exit_cost", "exit_value", "breached_side"):
+        assert key not in s
+    assert "已提前平仓 #1 ZZZQ 90 Put 卖 / 110 Call 买 风险反转" in capsys.readouterr().out
+
+
+def test_close_rr_skips_missing_ivs(rr_market, tmp_path, no_report):
+    _seed_rr(tmp_path)
+    for row in rr_market["puts"] + rr_market["calls"]:
+        row["iv"] = None
+    assert run(tmp_path, "close", "1", today=date(2026, 10, 20)) == 0
+    (s,) = ledger(tmp_path)["spreads"]
+    assert s["pnl"] == pytest.approx(230.0)
+    assert "exit_short_put_iv" not in s and "exit_long_call_iv" not in s
+
+
+@pytest.mark.parametrize("empty", ["puts", "calls"])
+def test_close_rr_refuses_without_quote(rr_market, tmp_path, capsys, no_report, empty):
+    _seed_rr(tmp_path)
+    before = (tmp_path / "spreads.json").read_text(encoding="utf-8")
+    rr_market[empty] = []
+    assert run(tmp_path, "close", "1", today=date(2026, 10, 20)) == 1
+    assert "错误" in capsys.readouterr().err
+    assert (tmp_path / "spreads.json").read_text(encoding="utf-8") == before
+
+
+def test_close_after_expiry_refused_for_rr(rr_market, tmp_path, capsys, no_report):
+    _seed_rr(tmp_path)
+    before = (tmp_path / "spreads.json").read_text(encoding="utf-8")
+    assert run(tmp_path, "close", "1", today=date(2026, 10, 24)) == 1
+    assert "过到期日" in capsys.readouterr().err
+    assert (tmp_path / "spreads.json").read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("failure", ["no_quote", "data_error"])
+def test_status_continues_past_an_rr_error(rr_market, tmp_path, capsys, monkeypatch,
+                                           no_report, failure):
+    def calls(t, e, strikes=()):
+        if t != "ZZZQ":
+            return rr_market["calls"]
+        if failure == "data_error":
+            raise spread_data.DataError("ZZZQ 期权链挂了")
+        return []
+    monkeypatch.setattr(spread_data, "fetch_calls", calls)
+    _seed_rr(tmp_path, _rr_rec(), _rr_rec(ticker="ZZZR"),
+             _rr_rec(ticker="ZZZS", expiry="2026-10-16"))
+    rr_market["closes"][date(2026, 10, 16)] = 120.0
+    assert run(tmp_path, "status", today=date(2026, 10, 20)) == 0
+    lines = capsys.readouterr().out.splitlines()
+    bad = next(line for line in lines if line.startswith("#1 ZZZQ"))
+    assert "找不到" in bad or "挂了" in bad
+    assert any(line.startswith("#2 ZZZR") and "浮盈亏 +$230" in line for line in lines)
+    s1, s2, s3 = ledger(tmp_path)["spreads"]
+    assert s1["status"] == "open" and s2["status"] == "open"
+    assert s3["status"] == "expired" and s3["pnl"] == pytest.approx(1050.0)
+
+
+def test_rr_leaves_paper_shares_alone(rr_market, tmp_path, capsys, no_report):
+    import paper_shares
+    doc, _ = paper_shares.add_lot(paper_shares.empty_lots(), ticker="ZZZQ", shares=100,
+                                  cost=95.0, opened_on="2026-10-01")
+    lots = tmp_path / paper_shares.LOTS_FILE
+    paper_shares.save_lots(lots, doc)
+    before = lots.read_bytes()
+    _seed_rr(tmp_path, _rr_rec(), _rr_rec(ticker="ZZZR"))
+    assert run(tmp_path, "close", "2", today=date(2026, 10, 20)) == 0
+    rr_market["closes"][date.fromisoformat(EXPIRY)] = 80.0   # put in the money: "down"
+    assert run(tmp_path, "status", today=date(2026, 10, 26)) == 0
+    assert lots.read_bytes() == before
+    assert "假设持仓" not in capsys.readouterr().out
+    for s in ledger(tmp_path)["spreads"]:
+        assert "lot_applied" not in s and "lot_ref" not in s
+
+
+def test_rr_status_and_close_write_reports_without_crashing(rr_market, tmp_path):
+    """The real report writers (not stubbed) must survive a risk reversal record."""
+    _seed_rr(tmp_path, _rr_rec(), _rr_rec(ticker="ZZZR"),
+             _rr_rec(ticker="ZZZS", expiry="2026-10-16"))
+    rr_market["closes"][date(2026, 10, 16)] = 80.0
+    assert run(tmp_path, "status", today=date(2026, 10, 20)) == 0
+    assert [s["status"] for s in ledger(tmp_path)["spreads"]] == ["open", "open", "expired"]
+    assert run(tmp_path, "close", "2", today=date(2026, 10, 20)) == 0
+    assert (tmp_path / "report.md").exists() and (tmp_path / "report.html").exists()
+
+
+def test_public_report_ignores_rr_records():
+    """Whitelist unchanged: the public page is byte-identical with and without a risk reversal."""
+    import spread_report
+    csp = {"strategy": "cash_secured_put", "ticker": "ABC", "contracts": 1,
+           "snapshot_date": "2026-10-16", "expiry": EXPIRY, "underlying_price": 100.0,
+           "short_strike": 95.0, "long_strike": None, "width": None, "credit": 0.75,
+           "short_delta": 0.2, "delta_bucket": 0.2, "status": "open", "exit_date": None,
+           "exit_underlying": None, "pnl": None, "result": None, "monday_gap_pct": None}
+    plain, _ = spread_ledger.add_spread(spread_ledger.empty_ledger(), csp)
+    mixed, _ = spread_ledger.add_spread(plain, _rr_rec())
+    marks = {1: {"cost": 0.5, "pnl": 10.0, "underlying": 100.0, "dist_pct": 5.0,
+                 "flags": {"stop": False, "take_profit": False}, "stale": False}}
+    assert spread_report.public_records(mixed["spreads"]) == plain["spreads"]
+    a = spread_report.render_public_report(plain["spreads"], marks, "2026-10-20")
+    b = spread_report.render_public_report(
+        spread_report.public_records(mixed["spreads"]), marks, "2026-10-20")
+    assert a.encode("utf-8") == b.encode("utf-8")
+    assert "ZZZQ" not in b and "风险反转" not in b
+
+
+def test_existing_strategies_unchanged_alongside_rr(market, tmp_path, capsys, monkeypatch,
+                                                    no_report):
+    monkeypatch.setattr(spread_data, "fetch_calls", lambda t, e, strikes=(): _legs((110.0, 3.00)))
+    alone, mixed = tmp_path / "alone", tmp_path / "mixed"
+    outputs, records = [], []
+    for folder in (alone, mixed):
+        folder.mkdir()
+        market["puts"], market["spot"] = make_chain(spot=100.0), 100.0
+        assert opened(folder, "ABC", "0.20") == 0
+        if folder is mixed:
+            led, _ = spread_ledger.add_spread(ledger(folder), _rr_rec())
+            spread_ledger.save(folder / "spreads.json", led)
+        capsys.readouterr()
+        market["puts"], market["spot"] = make_chain(spot=104.0), 104.0
+        assert run(folder, "status", today=date(2026, 10, 20)) == 0
+        abc = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("#1 ABC")]
+        assert run(folder, "close", "1", today=date(2026, 10, 20)) == 0
+        outputs.append((abc, capsys.readouterr().out))
+        records.append(ledger(folder)["spreads"][0])
+    assert outputs[0] == outputs[1] and records[0] == records[1]
+    assert spread_sim._line(_rr_rec(id=6)) == "#6 ZZZQ 90 Put 卖 / 110 Call 买 风险反转 到期 2026-10-23"
+
+
+# --- open --from-pick (today's /strategy-pick result) ----------------------------------------------
+from datetime import timedelta
+
+from frompick_fixtures import use_folder, write_pick
+
+
+@pytest.fixture
+def picks(monkeypatch, tmp_path_factory):
+    return use_folder(monkeypatch, tmp_path_factory.mktemp("picks"))
+
+
+def test_open_needs_bucket_or_from_pick(market, tmp_path, picks, capsys):
+    assert run(tmp_path, "suggest", "ABC", "--width", "5") == 0
+    with pytest.raises(SystemExit) as exc:
+        run(tmp_path, "open", "ABC")
+    assert exc.value.code == 2
+    assert "open 需要档位" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc:
+        run(tmp_path, "open", "ABC", "0.15", "--from-pick")
+    assert exc.value.code == 2
+    assert "档位和 --from-pick 只能二选一" in capsys.readouterr().err
+    assert not (tmp_path / 'spreads.json').exists()
+
+
+@pytest.mark.parametrize("case", ["missing", "older_file", "stale_run_date", "other_strategy"])
+def test_open_from_pick_refusal_exit_2_writes_nothing(market, tmp_path, picks, capsys, case):
+    assert run(tmp_path, "suggest", "ABC", "--width", "5") == 0
+    yesterday = SNAP - timedelta(days=1)
+    if case == "older_file":
+        write_pick(picks, "ABC", yesterday, "bull_put_spread", 0.1, 0.15)
+    elif case == "stale_run_date":
+        write_pick(picks, "ABC", yesterday, "bull_put_spread", 0.1, 0.15, file_date=SNAP)
+    elif case == "other_strategy":
+        write_pick(picks, "ABC", SNAP, "cash_secured_put", 0.1, 0.15)
+    capsys.readouterr()
+    assert run(tmp_path, "open", "abc", "--from-pick") == 2
+    out, err = capsys.readouterr()
+    assert out == "" and err.startswith("错误：")
+    assert not (tmp_path / 'spreads.json').exists()
+
+
+def test_open_from_pick_records_the_mapped_bucket(market, tmp_path, picks, capsys):
+    assert run(tmp_path, "suggest", "ABC", "--width", "5") == 0
+    write_pick(picks, "ABC", SNAP, "bull_put_spread", 0.1, 0.15)
+    capsys.readouterr()
+    assert run(tmp_path, "open", "abc", "--from-pick", "--contracts", "2") == 0
+    (s,) = ledger(tmp_path)["spreads"]
+    assert s["delta_bucket"] == 0.15 and s["contracts"] == 2
+    target = "0.10" if 0.1 == 0.15 else "0.10–0.15"
+    line = f"按 /strategy-pick {SNAP.isoformat()} 的结果：Delta 目标 {target} → 档位 0.15"
+    assert line in capsys.readouterr().out.splitlines()
+
+
+def test_open_from_pick_keeps_width_check(market, tmp_path, picks, capsys):
+    assert run(tmp_path, "suggest", "ABC", "--width", "5") == 0
+    write_pick(picks, "ABC", SNAP, "bull_put_spread", 0.1, 0.15)
+    assert run(tmp_path, "open", "ABC", "--from-pick", "--width", "7") == 1
+    assert "--width 7" in capsys.readouterr().err
+    assert not (tmp_path / 'spreads.json').exists()

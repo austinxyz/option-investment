@@ -7,19 +7,23 @@
 | 命令 | 做什么 | 什么时候用 | 状态 |
 |------|--------|-----------|------|
 | `/spread-sim` | Bull Put 价差：出三档候选、开仓（要你给 ticker）；`status` / `close` 也能在这里用，但统一入口见 `/paper-book` | 想试价差时，你自己点 ticker | 可用 |
-| `/paper-book` | 账本总入口：`status` 看浮盈亏并结算到期的、`close ID` 提前了结、`report` 看报告。**覆盖所有策略**，不用先想这笔是哪个命令开的 | 周中检查、到期后结算、想看整体情况时 | 可用 |
+| `/paper-book` | 账本总入口：`status` 看浮盈亏并结算到期的、`close ID` 提前了结、`report` 看报告。**覆盖所有策略**，不用先想这笔是哪个命令开的；`status` / `report` 还会生成总账 `book.md`（已实现 / 浮动 / 合计三个数分开列，加分策略表和每笔明细） | 周中检查、到期后结算、想看整体情况时 | 可用 |
 | `/put-screen` | 从 wiki 自动筛 Sell Put（现金担保 Put）候选，选中后记入同一个账本 | 想找 Sell Put 时（IBKR 模式任何时段都能跑） | 可用 |
 | `/call-screen` | 对持股筛备兑 Call（covered call）候选，选中后记入同一个账本；也用来练 Wheel | 想对涨不动的持股收租金时（IBKR 模式任何时段都能跑） | 可用 |
 | `/collar-screen` | 对持股筛 Collar（买 Put 下限 + 卖 Call 上限）和保护性 Put 候选，选中后记入同一个账本 | 想给已有持股设一个下限、又不想多掏现金时 | 可用，只做模拟 |
 | `/condor-sim` | 对你给的 ticker 出三档铁鹰（Iron Condor）候选，选中后记入同一个账本；一笔记一条整体记录 | 想试"赌股价留在区间里"的策略时，你自己点 ticker | 可用，只做模拟 |
 | `/bullcall-sim` | 对你给的 ticker 出三档 Call 借方价差（Bull Call Debit Spread）候选，选中后记入同一个账本；一笔记一条整体记录 | 想试"净付钱、靠赔率赚钱"的看涨买方策略时，你自己点 ticker | 可用，只做模拟 |
-| `/strategy-pick` | 对你给的 ticker 先选策略：读 wiki 论点、一年日线和期权数据（当前数据源），按七步决策树推荐 1–2 个看涨或中性策略，每一步的数字都写进报告；只建议，不开仓 | 不知道这只票该用哪个策略时，先跑它，再去用它指向的命令 | 可用，只读，报告写在私有的 `data/strategy-picks/` |
+| `/strategy-pick` | 对你给的 ticker 先选策略：读 wiki 论点、一年日线和期权数据（当前数据源），按七步决策树推荐 1–2 个策略（看涨、中性，或不看好时的 Bear Put / Bear Call 价差），每一步的数字都写进报告；只建议，不开仓 | 不知道这只票该用哪个策略时，先跑它，再去用它指向的命令 | 可用，只读，报告写在私有的 `data/strategy-picks/` |
+| `/rr-sim` | 对你给的 ticker 出三档风险反转（Risk Reversal：卖虚值 Put + 买虚值 Call）候选，选中后记入同一个账本；一笔记一条整体记录 | 想试"愿意按 Put 行权价接股、同时留住上涨空间"的看涨策略时，你自己点 ticker | 可用，只做模拟 |
+| `/bearcall-sim` | 对你给的 ticker 出三档 Call 贷方价差（Bear Call Credit Spread，看跌卖方）候选，选中后记入同一个账本；一笔记一条整体记录 | 想试"看不涨、净收钱"的看跌策略时，你自己点 ticker，或按 `/strategy-pick` 的推荐 | 可用，只做模拟，`/strategy-pick` 在不看好时推荐（未持有时排第二），`open TICKER --from-pick` 接它的档位 |
+| `/bearput-sim` | 对你给的 ticker 出三档 Put 借方价差（Bear Put Debit Spread，看跌买方）候选，选中后记入同一个账本；一笔记一条整体记录 | 想试"净付钱、靠赔率赚钱"的看跌策略时，你自己点 ticker，或按 `/strategy-pick` 的推荐 | 可用，只做模拟，`/strategy-pick` 在不看好时推荐（未持有时排第一，持股时排在减仓之后），`open TICKER --from-pick` 接它的档位 |
+| `/longput-sim` | 对你给的 ticker 出三档买入 Put（Long Put，单腿看跌买方）候选，选中后记入同一个账本 | 想试最直接的看跌押注、看看要跌多少才回本时，你自己点 ticker | 可用，只做模拟，`/strategy-pick` 不推荐 |
 | `/option-review` | 给账本里每笔未平仓持仓一个建议：平仓 / 继续持有 / 需要关注，并存快照 | 每周一次；想看时随时跑 | 可用 |
 | `/option-journal` | 复盘：用快照里的建议和最终结果比，看"建议准不准" | 有已结算持仓之后 | 可用 |
 
 ## 策略和工具的对应
 
-`wiki/options/strategies/` 里有 9 篇已分析的策略页，但模拟盘工具只覆盖其中一部分。下表说清楚哪个策略能在模拟盘里试、用哪个命令，哪个没有工具以及为什么。
+`wiki/options/strategies/` 里有 9 篇已分析的策略页，加上来源偏少、但已有工具的两个看跌价差共 11 篇，但模拟盘工具只覆盖其中一部分。下表说清楚哪个策略能在模拟盘里试、用哪个命令，哪个没有工具以及为什么。
 
 | 策略页 | 模拟盘工具 | 说明 |
 |---|---|---|
@@ -30,14 +34,16 @@
 | [保护性 Put / Collar](../wiki/options/strategies/protective-put-collar.md) | `/collar-screen` | 已覆盖：出三档候选（含只买 Put 的变体）、开仓、结算 |
 | [铁鹰（Iron Condor）](../wiki/options/strategies/iron-condor.md) | `/condor-sim` | 已覆盖：出三档候选、开仓、平仓、结算（按整体一条记录）；只做模拟 |
 | [Bull Call 借方价差](../wiki/options/strategies/bull-call-debit-spread.md) | `/bullcall-sim` | 已覆盖：出三档候选（按长腿 Delta 0.60 / 0.50 / 0.40）、开仓、平仓、结算（按整体一条记录，买方口径）；只做模拟 |
-| [买入 Call / 买入 Put](../wiki/options/strategies/long-call-long-put.md) | 无 | 不计划加：没有可检验的规则，模拟盘测不出东西 |
+| [Bear Call 贷方价差](../wiki/options/strategies/bear-call-credit-spread.md) | `/bearcall-sim` | 已覆盖（看跌）：出三档候选（按短腿 Call 的 Delta 0.10 / 0.15 / 0.20，长腿恰好高一个宽度）、开仓、平仓、结算（按整体一条记录，卖方口径）；只做模拟；`/strategy-pick` 在不看好时推荐（`open TICKER --from-pick`） |
+| [Bear Put 借方价差](../wiki/options/strategies/bear-put-debit-spread.md) | `/bearput-sim` | 已覆盖（看跌）：出三档候选（按长腿 Put 的 Delta 绝对值 0.60 / 0.50 / 0.40，短腿恰好低一个宽度，默认至少 30 天）、开仓、平仓、结算（按整体一条记录，买方口径）；只做模拟；`/strategy-pick` 在不看好时推荐（`open TICKER --from-pick`） |
+| [买入 Call / 买入 Put](../wiki/options/strategies/long-call-long-put.md) | `/longput-sim`（只有买入 Put） | 买入 Put 已覆盖（看跌）：出三档候选（按 Put 的 Delta 绝对值 0.50 / 0.40 / 0.30，默认至少 30 天）、开仓、平仓、结算；只做模拟，`/strategy-pick` 不推荐。买入 Call 仍没有工具：`/strategy-pick` 明确不推荐单腿买 Call，看涨买方用 `/bullcall-sim` |
 | [裸卖 Call](../wiki/options/strategies/naked-call.md) | 无 | **不计划加**：风险无限，策略页本身也不建议 |
 
 策略页只讲概念和风险，数字是来源里说的，不构成投资建议；"无工具"不代表不能做，只是没法在模拟盘里自动筛选和记账。
 
-六个开仓命令（`/spread-sim`、`/put-screen`、`/call-screen`、`/collar-screen`、`/condor-sim`、`/bullcall-sim`）共用**同一个账本**（价差、Sell Put、Covered Call、Collar / 保护性 Put、铁鹰、Call 借方价差记在一起，用 `strategy` 字段区分），所以报告里能并排比较各策略的胜率。`/paper-book` 是看账本的总入口，`/strategy-pick` 只读、不写账本。
+十个开仓命令（`/spread-sim`、`/put-screen`、`/call-screen`、`/collar-screen`、`/condor-sim`、`/bullcall-sim`、`/rr-sim`、`/bearcall-sim`、`/bearput-sim`、`/longput-sim`）共用**同一个账本**（价差、Sell Put、Covered Call、Collar / 保护性 Put、铁鹰、Call 借方价差、风险反转、Call 贷方价差、Put 借方价差、买入 Put 记在一起，用 `strategy` 字段区分），所以报告里能并排比较各策略的胜率。`/paper-book` 是看账本的总入口，`/strategy-pick` 只读、不写账本。
 
-**review（每周建议）和复盘不在各个开仓命令里，而是单独的命令，但覆盖整个账本，所有策略都在内。** 开仓命令负责出候选、开仓、平仓、看盈亏、到期结算；`/option-review` 给账本里每笔未平仓持仓（价差、Sell Put、Covered Call、Collar / 保护性 Put、铁鹰、Call 借方价差）出建议；`/option-journal` 比较这些建议和最终结果。三者读写同一份数据，所以不管哪个命令开的仓，都不需要另外做什么就会被检查。
+**review（每周建议）和复盘不在各个开仓命令里，而是单独的命令，但覆盖整个账本，所有策略都在内。** 开仓命令负责出候选、开仓、平仓、看盈亏、到期结算；`/option-review` 给账本里每笔未平仓持仓（价差、Sell Put、Covered Call、Collar / 保护性 Put、铁鹰、Call 借方价差、风险反转、三种看跌策略）出建议；`/option-journal` 比较这些建议和最终结果。三者读写同一份数据，所以不管哪个命令开的仓，都不需要另外做什么就会被检查。
 
 ## 完全没有的策略
 
@@ -50,9 +56,9 @@
 | 日历价差、对角价差 | 同样是到期日不同，账本放不进去 |
 | 跨式、宽跨式（买或卖） | 做的是波动率而不是方向，现有的七步决策树只处理"看好 / 中性 / 不看好"，没有对应的叶子；也没有可检验的规则 |
 | 蝶式、比例价差 | 结构更复杂（三条以上的腿或不对称张数），没有策略页，也没有可检验的规则 |
-| 买入 Call / 买入 Put、裸卖 Call | 有策略页，但**明确不做**：前者没有可检验的规则，模拟盘测不出东西；后者风险无限（见上表） |
+| 买入 Call、裸卖 Call | 有策略页，但**明确不做**：前者 `/strategy-pick` 不推荐、看涨买方已有 `/bullcall-sim`；后者风险无限（见上表）。买入 Put 已有 `/longput-sim` |
 
-**怎么看这份清单**：模拟盘的目的是用固定规则积累样本、看"建议准不准"（`/option-journal` 要 30 笔以上才下结论）。结构越复杂、越依赖主观判断的策略，越难凑出可比较的样本，所以现有工具集中在规则清楚的看涨 / 中性策略上。"没有工具"不代表这些策略不能做，只是没法在模拟盘里自动筛选和记账。
+**怎么看这份清单**：模拟盘的目的是用固定规则积累样本、看"建议准不准"（`/option-journal` 要 30 笔以上才下结论）。结构越复杂、越依赖主观判断的策略，越难凑出可比较的样本，所以现有工具集中在规则清楚的策略上：看涨 / 中性为主；看跌的两个价差（`/bearput-sim`、`/bearcall-sim`）由 `/strategy-pick` 在不看好时推荐；买入 Put（`/longput-sim`）只能手动使用，`/strategy-pick` 不会推荐它。"没有工具"不代表这些策略不能做，只是没法在模拟盘里自动筛选和记账。
 
 ## 一周怎么走（建议流程）
 
@@ -60,7 +66,7 @@
 1. **按策略挑合约、开仓**（所有开仓命令都是同一个套路：`suggest` 出候选 → 看说明文件 → 选一档 `open`，`open` 记的就是你看过的那份，不重新取行情）：
    - **现金担保 Put**：`/put-screen`，不用传 ticker，扫整个 wiki 列表。IBKR 模式任何时段都能跑（盘中数据最新，休市后用的是延迟冻结的上一交易日数据；Yahoo 模式建议美东开盘时间，休市后 bid/ask 常为空，见 `docs/option-data-sources.md`）。
    - **Bull Put 价差**：`/spread-sim suggest TICKER`（详见下面"价差怎么开仓和平仓"）。
-   - **Call 借方价差**：`/bullcall-sim suggest TICKER`；**铁鹰**：`/condor-sim suggest TICKER`。
+   - **Call 借方价差**：`/bullcall-sim suggest TICKER`；**铁鹰**：`/condor-sim suggest TICKER`；**风险反转**：`/rr-sim suggest TICKER`；看跌：**Bear Put 价差** `/bearput-sim suggest TICKER`、**Bear Call 价差** `/bearcall-sim suggest TICKER`（`/strategy-pick` 在不看好时会指向这两个）；**买入 Put** `/longput-sim suggest TICKER`（`/strategy-pick` 不会指向它，只能自己点 ticker）。
    - **备兑 Call**：`/call-screen suggest`；**Collar / 保护性 Put**：`/collar-screen suggest`。这两个对**持股**出候选，不用传 ticker。
 2. **开仓前核对**：把说明文件里的行权价、Delta、权利金和券商期权链核一遍。同一 ticker、同一到期日不能重复开（跨策略也算重复）。
 3. **每周五**：手动 `/option-review`。
@@ -302,6 +308,123 @@ Wheel：卖现金担保 Put → 被指派拿到股票 → 对股票卖 Call → 
 
 核算（1 张，每股 ×100）：净支出 = 3.20 − 1.30 = 1.90；最大亏损 / 占用资金 = 1.90 × 100 = $190；最大收益 = (5 − 1.90) × 100 = $310；盈亏平衡价 = 100 + 1.90 = 101.90（比现价高 1.90%）；短腿 105 比现价高 5.00%（满额幅度）；所需胜率 = 1.90 ÷ 5 = 38%。到期日收盘：99 或 100 → 价值 0，盈亏 = −$190（最大亏损，收盘等于长腿也是满额亏损）；101.90 → 价值 1.90，盈亏 0，记亏损；103 → 价值 3.00，盈亏 = (3.00 − 1.90) × 100 = +$110，捕获比例 110 ÷ 310 = 0.3548；120 → 价值钳到宽度 5，盈亏 +$310（最大收益）。**方向错了亏掉全部净支出，胜率低于一半是正常的。**
 
+### /rr-sim（风险反转）
+
+```bash
+./.venv/Scripts/python.exe scripts/rr_sim.py suggest TICKER [--min-days N]
+./.venv/Scripts/python.exe scripts/rr_sim.py open TICKER {0.30,0.20,0.15} [--contracts N]
+./.venv/Scripts/python.exe scripts/rr_sim.py status
+./.venv/Scripts/python.exe scripts/rr_sim.py close ID
+```
+
+- `suggest`：出三档候选，按**短 Put** 的 |Delta| 约 0.30 / 0.20 / 0.15（取虚值 Put；偏离目标超过 0.05 的档被剔除），再配一个**中间价最接近短 Put 中间价**的虚值 Call（不要求零成本，选出来是净收入就是净收入，是净支出就是净支出）。到期日取距快照日 30–60 天内最近的一个，没有则三档都剔除；`--min-days N`（N ≥ 7）可放宽下限。不写账本。
+- **流动性规则：两条腿都硬卡 5%**（各自买卖价差 ≤ 该腿中间价的 5%，恰好 5% 通过），超了该档剔除；报价陈旧只警告。
+- **净权利金 = 短 Put 中间价 − 长 Call 中间价**，正是净收入，负是净支出，报告里都标注。**占用资金按现金担保的保守口径**：(Put 行权价 − 净权利金) × 100 × 张数，每份候选和报告都标注"券商实际保证金因家而异"；最大亏损同一个数字（股价归零），**最大收益无上限**，不显示数字。没有"所需胜率"（无封顶的结构没有净支出 ÷ 宽度这个口径）。
+- `open`：把保存的那一档原样记成**一条**整体记录（不重新取行情，不需要网关）。同 ticker 同到期日已有任意策略的记录则拒绝。不占备兑额度，不碰纸上持股。
+- **每份候选都带三条固定提示**：下行风险接近裸卖 Put（股价跌破 Put 行权价会被指派，亏损一直算到归零）；两个行权价之间两腿都作废，Call 是净支出则白付；只适合真的愿意按 Put 行权价接股的标的。另只警告不排除：净支出偏大（超过短 Put 中间价的 25%，"Call 太贵"）、到期前有财报、除息日在到期前、报价陈旧。
+- **结算**（到期日收盘价 C）：每股期权腿合计 = max(C − Call 行权价, 0) − max(Put 行权价 − C, 0)；盈亏 = (合计 + 净权利金) × 100 × 张数。恰好为 0 记亏损。**结局区**（只在到期结算时写）：`up`（C 高于 Call 行权价）、`dead`（两个行权价之间，含行权价）、`down`（C 低于 Put 行权价，被指派）。`down` 时提示"真实情况下会按 Put 行权价接股；本工具不模拟股票腿"。
+- **提前平仓与提示线**：`status` 按每股平仓净成本 = 短 Put 当前中间价 − 长 Call 当前中间价（不钳位，可以为负）估值；浮盈到开仓时短 Put 中间价的 1 倍（含等号）提示止盈，浮亏到 2 倍提示止损，只提示不平仓。任一腿无报价则标"取不到报价"，`close` 拒绝。
+- **`/option-review` 的规则**：任一腿无报价 → 需要关注；到期日当天或已过 → 等待结算；**短 Put 价内（现价严格低于 Put 行权价）或已到止损线 → 需要关注**（"可能被指派，按 Put 行权价接股；由你决定接受还是买回"）；已到止盈线 → 平仓；到期前有财报，或短 Put |Delta| ≥ 0.35（仅数据可信时）→ 需要关注；其余继续持有。
+- **统计**：在"按策略对比"里有自己的一行和一节"风险反转记录"，**不进 Bull Put 的胜率与 Delta 档位表，也不进 `/option-journal` 的 A–D 块**；`/option-journal` 里有独立的"风险反转"块（胜率、期权腿总盈亏、up / dead / down 各几笔、下行笔的平均亏损）。少于 30 笔不下结论。
+- **不出现在公开页**。`status` / `close` 与其他策略共用。
+- 工具**不记**：被指派后的股票腿（接股、成本、之后的备兑）、调整、展期，平仓时的 IV 只在拿得到时才记。
+
+用虚构的 ZZZQ（现价 100）示范：
+
+```bash
+./.venv/Scripts/python.exe scripts/rr_sim.py suggest ZZZQ
+# 汇总里 0.20 档：卖 90 Put（中间价 2.00）、买 110 Call（中间价 1.50），净权利金 +0.50/股（净收入）
+./.venv/Scripts/python.exe scripts/rr_sim.py open ZZZQ 0.20
+./.venv/Scripts/python.exe scripts/rr_sim.py status
+```
+
+核算（1 张，每股 ×100）：净权利金 = 2.00 − 1.50 = +0.50（净收入）；占用资金（保守口径）= (90 − 0.50) × 100 = $8,950；下行盈亏平衡价 = 90 − 0.50 = 89.50；死区 90 ～ 110；下行幅度 = 90 ÷ 100 − 1 = −10.00%，上行幅度 = 110 ÷ 100 − 1 = +10.00%。到期日收盘：120 → 期权腿 10 + 0.50，盈亏 +$1,050（up）；110、100、90 → 期权腿 0 + 0.50，盈亏 +$50（110 和 90 恰在行权价上，价值 0；都落在 dead）；89.50 → −0.50 + 0.50，盈亏 $0，记亏损（down）；80 → −10 + 0.50，盈亏 −$950（down，被指派）。2 张、收盘 120 → +$2,100。提前平仓：Put 1.20 / Call 3.00 → 平仓净成本 −1.80，盈亏 (0.50 + 1.80) × 100 = +$230；Put 6.00 / Call 0.40 → 平仓净成本 5.60，盈亏 (0.50 − 5.60) × 100 = −$510。止盈线 +$200（1 × 2.00 × 100），止损线 −$400（2 × 2.00 × 100）。净支出例子：Put 1.20 / Call 1.80 → 净权利金 −0.60，占用资金 (90 + 0.60) × 100 = $9,060，上方回本价 110.60；|净支出| 0.60 > 1.20 × 25% = 0.30，出"Call 太贵，净支出偏大"警告。三笔 +$1,050 / +$50 / −$950 的复盘块：胜率 66.7%，总盈亏 +$150，结局 up 1 / dead 1 / down 1。**下行接近裸卖 Put，亏损算到归零，不是封顶。**
+
+### /bearcall-sim（Call 贷方价差，看跌）
+
+```bash
+./.venv/Scripts/python.exe scripts/bearcall_sim.py suggest TICKER [--width W]
+./.venv/Scripts/python.exe scripts/bearcall_sim.py open TICKER {0.10,0.15,0.20} [--contracts N] [--width W]
+./.venv/Scripts/python.exe scripts/bearcall_sim.py open TICKER --from-pick [--contracts N] [--width W]
+./.venv/Scripts/python.exe scripts/bearcall_sim.py status
+./.venv/Scripts/python.exe scripts/bearcall_sim.py close ID
+```
+
+- `suggest`：到期日取距快照日至少 7 天的第一个（同 `/spread-sim`）；三档按**短腿 Call** 的 Delta 约 0.10 / 0.15 / 0.20（取虚值 Call，偏离目标超过 0.05 的档被剔除），长腿**恰好**在短腿 + 宽度上，没有就剔除，不凑近似宽度。宽度用 `--width`，否则按 Call 链自动推荐，链太薄用默认值。不写账本。
+- **流动性规则：两条腿都硬卡 5%**；权利金 ≤ 0 或 ≥ 宽度的档剔除；报价陈旧只警告。
+- **钱**：最大收益 = 权利金 × 100；最大亏损 = 占用资金 = (宽度 − 权利金) × 100；盈亏平衡价 = 短腿 + 权利金；所需胜率 = 1 − 权利金 ÷ 宽度（卖方口径）。
+- **每份候选都带两条固定提示**：上涨亏钱、最大亏损是宽度减权利金；历史上市场整体向上漂移，看跌样本里亏的概率偏高。另只警告不排除：权利金太薄、到期前有财报、除息日在到期前且短 Call 已到价内边缘、报价陈旧。
+- **结算**：每股成本 = clamp(C − 短腿, 0, 宽度)，盈亏 = (权利金 − 成本) × 100 × 张数，恰好为 0 记亏损。提示线沿用卖方：浮盈 ≥ 权利金 50% 止盈，浮亏 ≥ 最大亏损 50% 止损（含等号）。
+- **`/option-review`**：卖方顺序、方向取反：现价**严格高于**短腿即价内（需要关注），已赚 80% 平仓，财报或短腿 Delta ≥ 0.35 关注。
+- **统计**：自己一行和一节"Call 贷方价差（看跌）记录"，**不进 Bull Put 的胜率与 Delta 档位表，也不进 `/option-journal` 的 A–D 块**；`/option-journal` 里有独立块（胜率、所需胜率逐笔平均、总盈亏）。少于 30 笔不下结论。
+- **不出现在公开页**；**`/strategy-pick` 在不看好时推荐它**，`open TICKER --from-pick` 按它今天的推荐选档（今天没跑过、文件旧、推荐里没有该策略都拒绝，退出码 2，什么都不写）；也可以手动使用。
+
+用虚构的 ZZZQ（现价 100）示范：
+
+```bash
+./.venv/Scripts/python.exe scripts/bearcall_sim.py suggest ZZZQ --width 5
+# 汇总里 0.15 档：卖 105 Call（中间价 2.10）、买 110 Call（中间价 0.90），权利金 1.20/股
+./.venv/Scripts/python.exe scripts/bearcall_sim.py open ZZZQ 0.15 --width 5
+```
+
+核算（1 张）：权利金 = 2.10 − 0.90 = 1.20；最大收益 $120；最大亏损 / 占用资金 = (5 − 1.20) × 100 = $380；盈亏平衡价 106.20（回本幅度 +6.20%）；涨到长腿 110 亏满（+10.00%）；所需胜率 = 1 − 1.20 ÷ 5 = 76%。到期日收盘：100 或 105 → +$120；106.20 → $0，记亏损；108 → −$180；110 或 120 → −$380。提前平仓：短 1.40 / 长 0.50 → 成本 0.90，+$30。止盈线 +$60，止损线 −$190。**上涨亏钱，最大亏损是宽度减权利金。**
+
+### /bearput-sim（Put 借方价差，看跌）
+
+```bash
+./.venv/Scripts/python.exe scripts/bearput_sim.py suggest TICKER [--width W] [--min-days N]
+./.venv/Scripts/python.exe scripts/bearput_sim.py open TICKER {0.60,0.50,0.40} [--contracts N] [--width W]
+./.venv/Scripts/python.exe scripts/bearput_sim.py open TICKER --from-pick [--contracts N] [--width W]
+./.venv/Scripts/python.exe scripts/bearput_sim.py status
+./.venv/Scripts/python.exe scripts/bearput_sim.py close ID
+```
+
+- `suggest`：到期日取距快照日**至少 30 天**的第一个（`--min-days N`，N ≥ 7 可放宽，不足 30 天警告"净买方，时间不在你这边"）；三档按**长腿 Put** 的 |Delta| 约 0.60 / 0.50 / 0.40（长腿可以是实值），短腿**恰好**在长腿 − 宽度上。不写账本。
+- **流动性规则：两条腿都硬卡 5%**；净支出 ≤ 0 或 ≥ 宽度的档剔除；报价陈旧只警告。
+- **钱**：最大亏损 = 占用资金 = 净支出 × 100；最大收益 = (宽度 − 净支出) × 100；盈亏平衡价 = 长腿 − 净支出；所需胜率 = 净支出 ÷ 宽度（买方口径）。
+- **每份候选都带两条固定提示**：方向错了亏掉全部净支出，所需胜率低于一半是正常的；历史上市场整体向上漂移，看跌样本里亏的概率偏高。另只警告不排除：到期前有财报、不足 30 天、报价陈旧。
+- **结算**：每股价值 = clamp(长腿 − C, 0, 宽度)，盈亏 = (价值 − 净支出) × 100 × 张数，恰好为 0 记亏损；捕获比例 = 盈亏 ÷ 最大收益。提示线：浮盈 ≥ 最大收益 50% 止盈，浮亏 ≥ 净支出 50% 止损（含等号）。
+- **`/option-review`**：买方规则（镜像 Call 借方价差），不用 Delta 规则，也没有除息日例外：浮亏 50% 关注；浮盈 50% 或现价跌到短腿平仓；财报、剩余 ≤ 10 天仍无浮盈、剩余 ≤ 5 天现价在两腿之间关注。
+- **统计**：自己一行和一节"Put 借方价差（看跌）记录"，**不进 Bull Put 的胜率与 Delta 档位表，也不进 A–D 块**；`/option-journal` 里有独立块（胜率、所需胜率逐笔平均、赢的笔平均捕获比例、总盈亏）。
+- **不出现在公开页**；**`/strategy-pick` 在不看好时推荐它**，`open TICKER --from-pick` 按它今天的推荐选档（今天没跑过、文件旧、推荐里没有该策略都拒绝，退出码 2，什么都不写）；也可以手动使用。
+
+用虚构的 ZZZQ（现价 100）示范：
+
+```bash
+./.venv/Scripts/python.exe scripts/bearput_sim.py suggest ZZZQ --width 10
+# 汇总里 0.50 档：买 100 Put（中间价 4.80）、卖 90 Put（中间价 1.80），净支出 3.00/股
+./.venv/Scripts/python.exe scripts/bearput_sim.py open ZZZQ 0.50 --width 10
+```
+
+核算（1 张）：净支出 = 4.80 − 1.80 = 3.00；最大亏损 / 占用资金 $300；最大收益 = (10 − 3.00) × 100 = $700；盈亏平衡价 97.00（回本幅度 −3.00%）；跌到短腿 90 赚满（−10.00%）；所需胜率 = 3.00 ÷ 10 = 30%。到期日收盘：105 或 100 → −$300（捕获 −0.4286）；97 → $0，记亏损；95 → +$200（捕获 0.2857）；90 或 80 → +$700（捕获 1.0）。止盈线 +$350，止损线 −$150。三笔 +$200 / +$700 / −$300 的复盘块：胜率 66.7%，赢的笔平均捕获 0.6429，总盈亏 +$600，所需胜率逐笔平均 30%。
+
+### /longput-sim（买入 Put，看跌）
+
+```bash
+./.venv/Scripts/python.exe scripts/longput_sim.py suggest TICKER [--min-days N]
+./.venv/Scripts/python.exe scripts/longput_sim.py open TICKER {0.50,0.40,0.30} [--contracts N]
+./.venv/Scripts/python.exe scripts/longput_sim.py status
+./.venv/Scripts/python.exe scripts/longput_sim.py close ID
+```
+
+- `suggest`：到期日取距快照日**至少 30 天**的第一个（`--min-days N`，N ≥ 7 可放宽，不足 30 天警告）；三档按 Put 的 |Delta| 约 0.50 / 0.40 / 0.30；单腿买卖价差 ≤ 5%（恰好 5% 通过）。没有宽度，也没有 `--width`。不写账本。
+- **钱**：最大亏损 = 占用资金 = 净支出（权利金）× 100；盈亏平衡价 = 行权价 − 净支出；最大收益（仅展示）= (行权价 − 净支出) × 100（标的归零）。**没有"所需胜率"**，报告和复盘看平均赢额 / 平均亏额和回本需下跌幅度。
+- **每份候选都带一条固定提示**：买方单腿每天 Theta 抽水，到期前不跌过盈亏平衡价就亏光全部权利金；历史上市场整体向上漂移，看跌样本里亏的概率偏高。
+- **结算**：每股价值 = max(行权价 − C, 0)（不设上限），盈亏 = (价值 − 净支出) × 100 × 张数，恰好为 0 记亏损；另记净支出倍数（盈亏 ÷ 净支出总额）。提示线：浮盈 ≥ 净支出 100% 止盈，浮亏 ≥ 净支出 50% 止损（含等号）。
+- **`/option-review`**：不用 Delta 规则：浮亏 50% 关注；浮盈 100% 平仓；财报、剩余 ≤ 10 天仍无浮盈、剩余 ≤ 5 天现价仍在行权价或以上关注。
+- **统计**：自己一行和一节"买入 Put（看跌）记录"，**不进 Bull Put 的胜率与 Delta 档位表，也不进 A–D 块**；`/option-journal` 里有独立块（胜率、平均赢额、平均亏额、总盈亏）。
+- **不出现在公开页**；**`/strategy-pick` 不会推荐**，只能手动使用。
+
+用虚构的 ZZZQ（现价 100）示范：
+
+```bash
+./.venv/Scripts/python.exe scripts/longput_sim.py suggest ZZZQ
+# 汇总里 0.30 档：买 95 Put（中间价 2.40），净支出 2.40/股
+./.venv/Scripts/python.exe scripts/longput_sim.py open ZZZQ 0.30
+```
+
+核算（1 张）：净支出 2.40；最大亏损 / 占用资金 $240；盈亏平衡价 92.60（回本幅度 −7.40%）；最大收益（展示）$9,260。到期日收盘：100 或 95 → −$240；92.60 → $0，记亏损；90 → +$260（净支出倍数 1.0833）；80 → +$1,260（5.25）。止盈线 +$240，止损线 −$120。三笔 +$260 / +$1,260 / −$240 的复盘块：胜率 66.7%，平均赢额 $760，平均亏额 $240，总盈亏 +$1,280。**每天 Theta 抽水，不跌过盈亏平衡价就亏光权利金。**
+
 ### /strategy-pick（先选策略）
 
 ```bash
@@ -313,12 +436,12 @@ Wheel：卖现金担保 Put → 被指派拿到股票 → 对股票卖 Call → 
 - **七步**：流动性门槛 → 标的类别（蓝筹 / 热门股 / ETF）→ 你的看法（wiki 论点或 `--view`）→ 一年走势 → IV 位置 → 是否持有 → 输出（1–2 个策略；财报 / 除息按类别并入警告）。报告里每一步都列出输入值、阈值、阈值常量名和结果，阈值表由代码按本次实际用到的常量生成。
 - **看法**：来自 wiki 的 overview 状态和 thesis；`--view` 优先，两者不一致会写警告。没有可用论点时**退出码 3**：不写文件，由你说出看法（看好 / 中性 / 不看好），再带 `--view` 重跑，工具不替你选。
 - **类别**：`--class bluechip|hot|etf`，不写则按 wiki 档位和 ETF 赛道表判定；热门股的阈值更严，财报在 7 天内第一推荐会变成"等财报后再看"。
-- **退出码**：0 写了文件（门槛出局、不看好、历史不足一年也写，结论是"不做期权建议"之类）；1 数据源或行情失败，什么都不写；2 参数错误；3 需要你给看法。"数据源明确说没有期权数据"算门槛出局（退出码 0），"找不到合约"算缺数据（退出码 1）。
+- **退出码**：0 写了文件（门槛出局、历史不足一年也写，结论是"不做期权建议"之类；不看好照常给推荐）；1 数据源或行情失败，什么都不写；2 参数错误；3 需要你给看法。"数据源明确说没有期权数据"算门槛出局（退出码 0），"找不到合约"算缺数据（退出码 1）。
 - **IV 位置是代理**：数据源没有 IV 历史，所以拿平值 IV 对自己过去一年的 21 日实现波动率分布做百分位，不是真正的 IV Rank；IV 缺失时退到实现波动率自比，是再退一步的代理。过去一年整体偏高或偏低时，百分位会误导。
 - **±15% 内行权价个数是代理**：按全链合并计数，可能多算。
 - **占比标记**：现金担保 Put 与 Bull Put 谁排第一，取决于"参考行权价 × 100 占组合约 x%"（≤ 10% 且蓝筹或 ETF → 现金担保 Put 第一）。这个占比挂在其中一个推荐的标记 `portfolio_share` 上；组合总值取不到时标 `rank_by_class_only`，只按类别排。文件里只写取整到两位小数的占比（如 `0.16`），组合总值本身不写。
-- **下一步命令有它们自己的限制**：`/put-screen` 接 `--tickers`（只筛你给的票，绕过 wiki 的 Avoid / 复核中状态），`/call-screen`、`/collar-screen` 不接 ticker、扫整个持股列表；`/put-screen` 和 `/call-screen` 接 `--delta`（0.05–0.40，默认 0.20，价差过宽时往外最多走到 0.10 或目标），`/collar-screen` 不按 Delta，而是按现价 90% / 85% / 80% 三档选 Put，所以远价外或"下行"的情形它们可能不出这只票；`/spread-sim`、`/condor-sim`、`/bullcall-sim` 才是对你给的 ticker 出候选。
-- **带过去**：报告里有 `### 把 Delta 目标带到下一步` 小节，控制台每个带 Delta 的推荐下有一行 `带过去：`，写出用哪个命令、选哪档（例如 `/put-screen suggest --dte monthly --tickers ZZZQ --delta 0.15`，或先 `/spread-sim suggest ZZZQ` 再 `open ZZZQ 0.15`）；Collar / 保护性 Put 带不过去，会写明并指向报告的"参考价位"。
+- **下一步命令有它们自己的限制**：`/put-screen` 接 `--tickers`（只筛你给的票，绕过 wiki 的 Avoid / 复核中状态），`/call-screen`、`/collar-screen` 不接 ticker、扫整个持股列表；`/put-screen` 和 `/call-screen` 接 `--delta`（0.05–0.40，默认 0.20，价差过宽时往外最多走到 0.10 或目标），`/collar-screen` 不按 Delta，而是按现价 90% / 85% / 80% 三档选 Put，所以远价外或"下行"的情形它们可能不出这只票；`/spread-sim`、`/condor-sim`、`/bullcall-sim`、`/bearput-sim`、`/bearcall-sim`、`/rr-sim` 才是对你给的 ticker 出候选（`/rr-sim` 不在 `/strategy-pick` 的推荐里，要自己点 ticker 用）。
+- **带过去**：报告里有 `### 把 Delta 目标带到下一步` 小节，控制台每个带 Delta 的推荐下有一行 `带过去：`，写出用哪个命令、选哪档（例如 `/put-screen suggest --dte monthly --tickers ZZZQ --delta 0.15`，或先 `/spread-sim suggest ZZZQ` 再 `open ZZZQ 0.15`）；Bear Put 价差是先 `/bearput-sim suggest ZZZQ` 再 `open ZZZQ 0.60`（或更便宜的 0.50），Bear Call 价差是先 `/bearcall-sim suggest ZZZQ` 再 `open ZZZQ 0.15`（或更价外的 0.10）。这些 `open` 都可以改写成 `open ZZZQ --from-pick`，由命令自己读今天的推荐（今天没跑过、文件旧、推荐里没有该策略都拒绝，退出码 2，什么都不写）。Collar / 保护性 Put 带不过去，会写明并指向报告的"参考价位"。
 - 它**不选合约**：参考价位 = 现价 ∓ z × 1σ 预期波动（线性近似，忽略漂移和偏度，标"粗略"），只是给你去挑合约时的区间。
 
 用虚构的 ZZZQ 示范（运行日 2026-10-25，行情快照日 2026-10-23；蓝筹，wiki 状态 Active → 看好，论点 56 天未过期；未持有；虚构的组合总值 200,000）：
@@ -339,10 +462,12 @@ Wheel：卖现金担保 Put → 被指派拿到股票 → 对股票卖 Call → 
 - **IV 低**：231 个窗口里只有 58 个 ≤ 0.32 → 58 ÷ 231 = 0.25108 → 25.1% ≤ 30%，IV 低 → 看好 × 未持有 × 稳步上涨 × IV 低 → **Bull Call 价差**，长腿 Delta 0.50–0.60，参考 = 现价 100.00，下一步 `/bullcall-sim suggest ZZZQ`。
 - **没有 wiki 论点**：退出码 3，不写文件，问你看法；你答"中性"后用 `--view 中性` 重跑 → 中性 × 未持有 × IV 高 → 现金担保 Put 远价外或 Bull Put 远价外（0.10 / 0.15 档）。
 - **热门股财报 5 天后**：第一推荐变成"等财报后再看"，第二是 Bull Put 价差，现金担保 Put 进"为什么不选"（`earnings_imminent`）；仍然最多 2 个。
+- **`--view 不看好`、未持有**：第一 **Bear Put 价差**（长 Put Delta 0.50–0.60，参考 ≈ 现价 100.00，粗略；下一步 `/bearput-sim suggest ZZZQ`，再 `open ZZZQ 0.60`），第二 **Bear Call 价差**（短 Call Delta 0.10–0.15，参考 ≈ 109.22–111.34，粗略；下一步 `/bearcall-sim suggest ZZZQ`，再 `open ZZZQ 0.15`）。另带提示（wiki 是 Active，所以还有一条看法冲突）：历史上市场整体向上漂移，看跌策略样本里亏的概率偏高；走势是稳步上涨，看跌价差是逆势单；IV 高时 Bear Put 买方付的权利金偏贵。热门股财报 7 天内则变成"等财报后再看 + Bear Put 价差"。
+- **`--view 不看好`、单账户 ≥ 100 股**：第一考虑减仓，第二 Bear Put 价差；Collar 只在提示里提一句。买入 Put 单腿永不推荐，需要时手动用 `/longput-sim`。
 
 ## 数据源（期权数据）
 
-期权工具有三种数据源：`ibkr`（IBKR 模拟盘网关，只读、延迟数据）、`yahoo`（Yahoo Finance 免费行情，数据质量低）、`demo`（离线演示，全部虚构）。`/spread-sim`、`/put-screen`、`/call-screen`、`/collar-screen`、`/condor-sim`、`/bullcall-sim`、`/option-review`、`/strategy-pick` 的期权数据（到期日、报价、隐含波动率、Delta）都来自当前数据源；Moving average、财报和除息日一律来自 Yahoo。
+期权工具有三种数据源：`ibkr`（IBKR 模拟盘网关，只读、延迟数据）、`yahoo`（Yahoo Finance 免费行情，数据质量低）、`demo`（离线演示，全部虚构）。`/spread-sim`、`/put-screen`、`/call-screen`、`/collar-screen`、`/condor-sim`、`/bullcall-sim`、`/rr-sim`、`/bearcall-sim`、`/bearput-sim`、`/longput-sim`、`/option-review`、`/strategy-pick` 的期权数据（到期日、报价、隐含波动率、Delta）都来自当前数据源；Moving average、财报和除息日一律来自 Yahoo。
 
 **选哪个**，优先级从高到低：环境变量 `OPTION_DATA_SOURCE=ibkr|yahoo|demo` > `data/config.md` 里的一行 `option_data_source: yahoo` > `scripts/option_source_default.py` 的 `DEFAULT_SOURCE`。写错值会报错，不会悄悄换源。每份报告开头写明数据来源和数据质量；非 IBKR 时数据质量标“低”或“演示”，账本和 json 里也带 `data_quality`。演示数据的账本单独放在 `data/paper-trading-demo/`。
 
@@ -363,6 +488,7 @@ IBKR 模式装依赖、网关设置和端口见 `docs/option-data-sources.md`。
 | 要看什么 | 文件 |
 |---|---|
 | 持仓盈亏、占用资金、盈亏%、两种策略对比 | `data/paper-trading/report.md`（文字）、`report.html`（网页）；每次 `open` / `status` / `close` 后更新 |
+| 全部策略的总账（总盈亏、分策略、每笔明细） | `data/paper-trading/book.md`；`scripts/paper_book.py` 生成，`status` 取行情算浮动盈亏，默认离线；只读账本，覆盖写 |
 | Sell Put 筛选汇总 | `data/paper-trading/put-screen/<日期>.md` |
 | Covered Call 筛选汇总 | `data/paper-trading/call-screen/<日期>.md` |
 | Collar / 保护性 Put 筛选汇总 | `data/paper-trading/collar-screen/<日期>.md`（和同名 `.json`） |
@@ -371,6 +497,14 @@ IBKR 模式装依赖、网关设置和端口见 `docs/option-data-sources.md`。
 | 铁鹰逐只候选 | `data/paper-trading/suggestions/<日期>-<TICKER>-condor.md`（和同名 `.json`，`open` 读的是 `.json`） |
 | Call 借方价差筛选汇总 | `data/paper-trading/bullcall-sim/<日期>.md` |
 | Call 借方价差逐只候选 | `data/paper-trading/suggestions/<日期>-<TICKER>-bullcall.md`（和同名 `.json`，`open` 读的是 `.json`） |
+| 风险反转筛选汇总 | `data/paper-trading/rr-sim/<日期>.md` |
+| 风险反转逐只候选 | `data/paper-trading/suggestions/<日期>-<TICKER>-rr.md`（和同名 `.json`，`open` 读的是 `.json`） |
+| Call 贷方价差筛选汇总 | `data/paper-trading/bearcall-sim/<日期>.md` |
+| Call 贷方价差逐只候选 | `data/paper-trading/suggestions/<日期>-<TICKER>-bearcall.md`（和同名 `.json`，`open` 读的是 `.json`） |
+| Put 借方价差筛选汇总 | `data/paper-trading/bearput-sim/<日期>.md` |
+| Put 借方价差逐只候选 | `data/paper-trading/suggestions/<日期>-<TICKER>-bearput.md`（和同名 `.json`，`open` 读的是 `.json`） |
+| 买入 Put筛选汇总 | `data/paper-trading/longput-sim/<日期>.md` |
+| 买入 Put逐只候选 | `data/paper-trading/suggestions/<日期>-<TICKER>-longput.md`（和同名 `.json`，`open` 读的是 `.json`） |
 | 假设持仓（手动添加或 Put 被指派而来） | `data/paper-trading/paper_shares.json`（**不要手改**，用 `shares` 子命令） |
 | 每只候选为什么选这个合约 | `data/paper-trading/suggestions/<日期>-<TICKER>[-put].md` |
 | 每周建议和历史 | `data/paper-trading/reviews/<日期>.md` / `.json` |
@@ -378,7 +512,7 @@ IBKR 模式装依赖、网关设置和端口见 `docs/option-data-sources.md`。
 | 你记的笔记 | `data/paper-trading/journal-notes.json`（只有你用 `note` 记了才有） |
 | 账本 | `data/paper-trading/spreads.json`（**不要手改**，脚本每次写之前会备份 `.bak`） |
 
-占用资金的口径：价差 = 最大亏损（宽度 − 权利金）× 100 × 张数；Sell Put = 行权价 × 100 × 张数；Covered Call 不占用额外现金（股票已持有，盈亏%以成本 × 股数为分母）；Collar / 保护性 Put 不占用买股票的现金，只有净支出（Put 付出多于 Call 收到的部分）计入占用资金，净收入或零成本不占用；铁鹰 = (单侧宽度 − 净权利金) × 100 × 张数（到期最多一侧亏满）；Call 借方价差 = 净支出 × 100 × 张数（方向错了亏掉全部净支出）。盈亏% = 盈亏 ÷ 占用资金。所有金额按每张合约 ×100、中间价成交、不含手续费；模拟结果会比真实略乐观（真实无法按快照价成交）。
+占用资金的口径：价差 = 最大亏损（宽度 − 权利金）× 100 × 张数；Sell Put = 行权价 × 100 × 张数；Covered Call 不占用额外现金（股票已持有，盈亏%以成本 × 股数为分母）；Collar / 保护性 Put 不占用买股票的现金，只有净支出（Put 付出多于 Call 收到的部分）计入占用资金，净收入或零成本不占用；铁鹰 = (单侧宽度 − 净权利金) × 100 × 张数（到期最多一侧亏满）；Call 借方价差 = 净支出 × 100 × 张数（方向错了亏掉全部净支出）；风险反转 = (Put 行权价 − 净权利金) × 100 × 张数（现金担保的保守口径，券商实际保证金因家而异）；Call 贷方价差 = (宽度 − 权利金) × 100 × 张数；Put 借方价差和买入 Put = 净支出 × 100 × 张数（方向错了亏掉全部净支出）。盈亏% = 盈亏 ÷ 占用资金。所有金额按每张合约 ×100、中间价成交、不含手续费；模拟结果会比真实略乐观（真实无法按快照价成交）。
 
 `data/` 整个目录不进 git，不会公开。
 
@@ -389,5 +523,7 @@ IBKR 模式装依赖、网关设置和端口见 `docs/option-data-sources.md`。
 - Collar / 保护性 Put 不计入胜率统计，也不在公开页出现；模拟盘只做模拟。
 - 铁鹰按整体记一条，不计入 Bull Put 的胜率和 Delta 档位表，也不在公开页出现；短腿硬卡 5%、长翼只警告 15%，与策略页"四条腿都过 5%"不同；大涨对它是满额亏损。
 - Call 借方价差是**买方**策略，按整体记一条，不计入 Bull Put 的胜率和 Delta 档位表，也不在公开页出现；两条腿都硬卡 5%；所需胜率是净支出 ÷ 宽度（与卖方口径相反）；方向错了亏掉全部净支出。
+- 风险反转按整体记一条，不计入 Bull Put 的胜率和 Delta 档位表，也不在公开页出现；**下行风险接近裸卖 Put，亏损算到归零，占用资金按现金担保的保守口径**；最大收益无上限；两个行权价之间是死区；只记期权腿，不模拟被指派后的股票腿。
+- 三个看跌工具（`/bearcall-sim`、`/bearput-sim`、`/longput-sim`）都按整体记一条，不计入 Bull Put 的胜率和 Delta 档位表，也不进 `/option-journal` 的 A–D，不在公开页出现；**`/strategy-pick` 在不看好时推荐 Bear Put / Bear Call 价差**（每次推荐看跌价差都带一条漂移提示）；买入 Put 只能手动使用，`/strategy-pick` 不会推荐它。Call 贷方价差上涨亏钱，最大亏损是宽度减权利金；Put 借方价差方向错了亏掉全部净支出；买入 Put 每天 Theta 抽水、没有所需胜率。历史上市场整体向上漂移，看跌样本里亏的概率偏高。
 - 模拟盘里你用的"愿意持有"这条线，来自 wiki 的结论和档位；Avoid 的会被剔除，Watch 不等于买入信号。
 - 想学期权的基础概念和策略，看 `wiki/options/`（知识综合总结、各视频解析）。

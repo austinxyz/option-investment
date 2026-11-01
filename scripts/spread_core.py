@@ -527,3 +527,234 @@ def bullcall_threshold_flags(debit: float, width: float, pnl: float,
         "stop": pnl <= -BULLCALL_STOP_FRACTION * max_loss,
         "take_profit": pnl >= BULLCALL_TAKE_PROFIT_FRACTION * max_profit,
     }
+
+
+# --- risk reversal (short put + long call): per-share inputs, dollar pnl outputs
+# (x100 x contracts). Value is NOT clamped: upside is unbounded, downside runs to zero.
+# Own helpers only; never routes through the seller/buyer functions above.
+RR_PUT_DELTA_BUCKETS = (0.30, 0.20, 0.15)
+RR_MIN_DAYS = 30
+RR_MAX_DAYS = 60
+RR_DEBIT_WARN_FRACTION = 0.25
+RR_TAKE_PROFIT_MULTIPLE = 1.0
+RR_STOP_LOSS_MULTIPLE = 2.0
+RR_ROUNDING_TOL = 1e-4
+
+
+def rr_net_credit(put_mid: float, call_mid: float) -> float:
+    """Per-share net premium: short put mid - long call mid. Positive = credit, negative = debit."""
+    return round(put_mid - call_mid, 4)
+
+
+def rr_expiry_value(put_strike: float, call_strike: float, close: float) -> float:
+    """Per-share option-leg value at expiry: long call intrinsic - short put intrinsic."""
+    return max(close - call_strike, 0.0) - max(put_strike - close, 0.0)
+
+
+def rr_expiry_pnl(net_credit: float, value: float, contracts: int = 1) -> tuple[float, str]:
+    """Dollars (value + net_credit) x 100 x contracts, signed, and win/loss; pnl == 0 is a loss.
+
+    `+ 0.0` turns a float-noise -0.0 into 0.0 so it never prints as "-$0"."""
+    pnl = round((value + net_credit) * 100 * contracts, 2) + 0.0
+    return pnl, ("win" if pnl > 0 else "loss")
+
+
+def rr_outcome_zone(put_strike: float, call_strike: float, close: float) -> str:
+    """Where the expiry close landed: "up" past the call, "down" below the put, else "dead"."""
+    if close > call_strike:
+        return "up"
+    if close < put_strike:
+        return "down"
+    return "dead"
+
+
+def rr_exit_net(put_mid: float, call_mid: float) -> float:
+    """Per-share net cost to close now: put mid - call mid. Not clamped; negative when the call is worth more."""
+    return put_mid - call_mid
+
+
+def rr_close_pnl(net_credit: float, exit_net: float, contracts: int = 1) -> float:
+    """Dollars (net_credit - exit_net) x 100 x contracts, signed, `+ 0.0` against -0.0."""
+    return round((net_credit - exit_net) * 100 * contracts, 2) + 0.0
+
+
+def rr_breakeven_down(put_strike: float, net_credit: float) -> float:
+    """Downside breakeven price at expiry: put strike - net credit (4 places)."""
+    return round(put_strike - net_credit, 4)
+
+
+def rr_capital(put_strike: float, net_credit: float, contracts: int = 1) -> float:
+    """Conservative cash-secured basis in dollars: (put strike - net credit) x 100 x contracts."""
+    return round((put_strike - net_credit) * 100 * contracts, 2)
+
+
+def rr_put_move_pct(put_strike: float, underlying: float) -> float:
+    """Put strike versus spot as a signed ratio: strike / underlying - 1 (negative when OTM)."""
+    return put_strike / underlying - 1
+
+
+def rr_call_move_pct(call_strike: float, underlying: float) -> float:
+    """Call strike versus spot as a signed ratio: strike / underlying - 1 (positive when OTM)."""
+    return call_strike / underlying - 1
+
+
+def rr_threshold_flags(short_put_mid: float, pnl: float, contracts: int = 1) -> dict[str, bool]:
+    """Take profit at +1x and stop at -2x the opening short-put premium (dollars); inclusive, advisory."""
+    premium = short_put_mid * 100 * contracts
+    return {
+        "stop": pnl <= -RR_STOP_LOSS_MULTIPLE * premium,
+        "take_profit": pnl >= RR_TAKE_PROFIT_MULTIPLE * premium,
+    }
+
+
+# --- bear call spread (credit): short call at the lower strike, long call at short + width.
+# Per-share inputs, dollar pnl outputs (x100 x contracts). Reuses DELTA_BUCKETS, the seller
+# `threshold_flags` and `breakeven_win_rate`; never routes through the put-side `expiry_pnl`.
+BEARCALL_ROUNDING_TOL = 1e-4
+
+
+def bearcall_expiry_cost(short_strike: float, width: float, close: float) -> float:
+    """Per-share cost to close at expiry: (close - short strike) clamped to [0, width]."""
+    return min(max(close - short_strike, 0.0), width)
+
+
+def bearcall_pnl(credit: float, cost: float, contracts: int = 1) -> tuple[float, str]:
+    """Dollars (credit - cost) x 100 x contracts, signed, and win/loss; pnl == 0 is a loss.
+
+    `+ 0.0` turns a float-noise -0.0 into 0.0 so it never prints as "-$0"."""
+    pnl = round((credit - cost) * 100 * contracts, 2) + 0.0
+    return pnl, ("win" if pnl > 0 else "loss")
+
+
+def bearcall_breakeven(short_strike: float, credit: float) -> float:
+    """Per-share breakeven price at expiry: short strike + net credit."""
+    return short_strike + credit
+
+
+def bearcall_close_cost(short_mid: float, long_mid: float, width: float) -> float:
+    """Per-share cost to buy the spread back now: short mid - long mid, clamped to [0, width]."""
+    return min(max(short_mid - long_mid, 0.0), width)
+
+
+def bearcall_in_the_money(spot: float, short_strike: float) -> bool:
+    """True when spot is strictly above the short call strike."""
+    return spot > short_strike
+
+
+# --- bear put spread (debit): long put at the higher strike, short put at long - width.
+# Per-share inputs, dollar pnl outputs (x100 x contracts). Value is clamped to [0, width];
+# own helpers only, never routes through the seller functions above.
+BEARPUT_DELTA_BUCKETS = (0.60, 0.50, 0.40)
+BEARPUT_MIN_DAYS = 30
+BEARPUT_TAKE_PROFIT_FRACTION = 0.50
+BEARPUT_STOP_FRACTION = 0.50
+BEARPUT_TIME_STOP_DAYS = 10
+BEARPUT_ROUNDING_TOL = 1e-4
+
+
+def bearput_breakeven(long_strike: float, debit: float) -> float:
+    """Per-share breakeven price at expiry: long put strike - net debit."""
+    return long_strike - debit
+
+
+def bearput_required_win_rate(debit: float, width: float) -> float:
+    """Win probability needed to break even, a ratio: debit / width."""
+    return debit / width
+
+
+def bearput_max_profit(debit: float, width: float, contracts: int = 1) -> float:
+    """Max profit in dollars (positive): (width - debit) x 100 x contracts."""
+    return round((width - debit) * 100 * contracts, 2) + 0.0
+
+
+def bearput_max_loss(debit: float, contracts: int = 1) -> float:
+    """Max loss in dollars as a positive magnitude: debit x 100 x contracts."""
+    return round(debit * 100 * contracts, 2) + 0.0
+
+
+def bearput_close_value(long_mid: float, short_mid: float, width: float) -> float:
+    """Per-share value to sell the spread now: long mid - short mid, clamped to [0, width]."""
+    return min(max(long_mid - short_mid, 0.0), width)
+
+
+def bearput_expiry_value(long_strike: float, width: float, close: float) -> float:
+    """Per-share spread value at expiry: (long put strike - close) clamped to [0, width]."""
+    return min(max(long_strike - close, 0.0), width)
+
+
+def bearput_pnl(debit: float, value: float, contracts: int = 1) -> tuple[float, str]:
+    """Dollars (value - debit) x 100 x contracts, signed, and win/loss; pnl == 0 is a loss.
+
+    `+ 0.0` turns a float-noise -0.0 into 0.0 so it never prints as "-$0"."""
+    pnl = round((value - debit) * 100 * contracts, 2) + 0.0
+    return pnl, ("win" if pnl > 0 else "loss")
+
+
+def bearput_fraction_captured(pnl: float, debit: float, width: float,
+                              contracts: int = 1) -> float:
+    """Dollar pnl as a signed fraction of max profit; negative when losing."""
+    return pnl / bearput_max_profit(debit, width, contracts)
+
+
+def bearput_threshold_flags(debit: float, width: float, pnl: float,
+                            contracts: int = 1) -> dict[str, bool]:
+    """Stop at 50% of max loss (the debit), take-profit at 50% of max profit; inclusive, advisory."""
+    max_loss = bearput_max_loss(debit, contracts)
+    max_profit = bearput_max_profit(debit, width, contracts)
+    return {
+        "stop": pnl <= -BEARPUT_STOP_FRACTION * max_loss,
+        "take_profit": pnl >= BEARPUT_TAKE_PROFIT_FRACTION * max_profit,
+    }
+
+
+# --- long put (debit, single leg): per-share inputs, dollar pnl outputs (x100 x contracts).
+# Value is NOT clamped above (runs to the strike if the stock goes to zero). No required
+# win rate. Own helpers only, never routes through the seller functions above.
+LONGPUT_DELTA_BUCKETS = (0.50, 0.40, 0.30)
+LONGPUT_MIN_DAYS = 30
+LONGPUT_TAKE_PROFIT_FRACTION = 1.00
+LONGPUT_STOP_FRACTION = 0.50
+LONGPUT_TIME_STOP_DAYS = 10
+LONGPUT_ROUNDING_TOL = 1e-4
+
+
+def longput_breakeven(strike: float, debit: float) -> float:
+    """Per-share breakeven price at expiry: put strike - debit."""
+    return strike - debit
+
+
+def longput_max_loss(debit: float, contracts: int = 1) -> float:
+    """Max loss in dollars as a positive magnitude: debit x 100 x contracts."""
+    return round(debit * 100 * contracts, 2) + 0.0
+
+
+def longput_max_profit_display(strike: float, debit: float, contracts: int = 1) -> float:
+    """Display-only max profit in dollars if the stock goes to zero: (strike - debit) x 100 x contracts."""
+    return round((strike - debit) * 100 * contracts, 2) + 0.0
+
+
+def longput_expiry_value(strike: float, close: float) -> float:
+    """Per-share put value at expiry: max(strike - close, 0), no upper clamp."""
+    return max(strike - close, 0.0)
+
+
+def longput_pnl(debit: float, value: float, contracts: int = 1) -> tuple[float, str]:
+    """Dollars (value - debit) x 100 x contracts, signed, and win/loss; pnl == 0 is a loss.
+
+    `+ 0.0` turns a float-noise -0.0 into 0.0 so it never prints as "-$0"."""
+    pnl = round((value - debit) * 100 * contracts, 2) + 0.0
+    return pnl, ("win" if pnl > 0 else "loss")
+
+
+def longput_fraction_of_debit(pnl: float, debit: float, contracts: int = 1) -> float:
+    """Dollar pnl as a signed multiple of the dollar debit, rounded to 4 places; -1.0 is a total loss."""
+    return round(pnl / longput_max_loss(debit, contracts), 4) + 0.0
+
+
+def longput_threshold_flags(debit: float, pnl: float, contracts: int = 1) -> dict[str, bool]:
+    """Take-profit at +1.00x and stop at -0.50x the dollar debit; inclusive, advisory."""
+    total = longput_max_loss(debit, contracts)
+    return {
+        "stop": pnl <= -LONGPUT_STOP_FRACTION * total,
+        "take_profit": pnl >= LONGPUT_TAKE_PROFIT_FRACTION * total,
+    }

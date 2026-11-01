@@ -23,6 +23,8 @@ STRATEGY_PROTECTIVE_PUT = "protective_put"
 STRATEGY_IRON_CONDOR = "iron_condor"
 # Two-leg, lot-less debit strategy: like the condor it clashes with any same ticker+expiry record.
 STRATEGY_BULL_CALL = "bull_call_spread"
+# Two-leg, lot-less strategy (short put + long call): clashes with any same ticker+expiry record.
+STRATEGY_RR = "risk_reversal"
 # Strategies written against a held lot (they carry a lot_ref).
 LOT_STRATEGIES = (STRATEGY_COVERED_CALL, STRATEGY_COLLAR, STRATEGY_PROTECTIVE_PUT)
 # Strategies that sell a call against the lot (they consume covered contracts).
@@ -32,6 +34,18 @@ CONDOR_STRIKE_KEYS = ("put_long_strike", "put_short_strike", "call_short_strike"
 # Bull call spread strikes: long call first (the lower one), then the short call.
 BULLCALL_STRIKE_KEYS = ("long_call_strike", "short_call_strike")
 BULLCALL_LABEL = "Call 借方价差"
+# Risk reversal strikes: short put first, then the long call.
+RR_STRIKE_KEYS = ("short_put_strike", "long_call_strike")
+RR_LABEL = "风险反转"
+# Bearish, lot-less strategies: like the condor they clash with any same ticker+expiry record.
+STRATEGY_BEAR_CALL = "bear_call_spread"
+BEARCALL_LABEL = "Call 贷方价差"
+STRATEGY_BEAR_PUT = "bear_put_spread"
+BEARPUT_LABEL = "Put 借方价差"
+# Bear put spread strikes: long put first (the higher one), then the short put.
+BEARPUT_STRIKE_KEYS = ("long_put_strike", "short_put_strike")
+STRATEGY_LONG_PUT = "long_put"
+LONGPUT_LABEL = "买入 Put"
 # Breached side of a settled condor: short labels for table cells, long ones for sentences.
 BREACHED_SIDE_LABELS = {"none": "未突破", "put": "Put 侧", "call": "Call 侧"}
 BREACHED_SIDE_LONG_LABELS = {k: v if k == "none" else f"{v}被突破"

@@ -1,6 +1,6 @@
 # strategy-pick
 
-**先选策略**：用户给一个 ticker（和自己的看法），脚本读 wiki 论点、一年日线和期权数据（当前数据源），按固定的七步决策树推荐 **1–2 个**看涨或中性的期权策略，并写出一份逐步算清楚的报告（每一步的输入值、阈值、阈值常量名、结果）。它回答的是"这只票该用哪种策略"，选定之后再用对应的真实命令（`/put-screen`、`/spread-sim` 等）去挑合约。
+**先选策略**：用户给一个 ticker（和自己的看法），脚本读 wiki 论点、一年日线和期权数据（当前数据源），按固定的七步决策树推荐 **1–2 个**期权策略（看好、中性时是看涨或中性策略；不看好时是 Bear Put / Bear Call 价差或先减仓；买入 Put 单腿永不推荐，需要时手动用 `/longput-sim`），并写出一份逐步算清楚的报告（每一步的输入值、阈值、阈值常量名、结果）。它回答的是"这只票该用哪种策略"，选定之后再用对应的真实命令（`/put-screen`、`/spread-sim` 等）去挑合约。
 
 **Advisory only.** 只读：不下单、不连券商、不写 `data/positions.md`、账本、`wiki/`、`outputs/`；只写私有目录 `data/strategy-picks/<运行日期>-<TICKER>.md` 和同名 `.json`（gitignored，里面有持仓判定与论点看法）。永远不替用户开仓，不替用户选看法。研究用途，非投资建议。
 
@@ -28,7 +28,7 @@
 
 | 码 | 含义 | 写文件？ |
 |----|------|----------|
-| 0 | 完成。**包括**门槛出局、不看好、历史不足一年——这些都写文件，结论是"不做期权建议"之类 | 写 `.md` + `.json` |
+| 0 | 完成。**包括**门槛出局、历史不足一年——这些也写文件，结论是"不做期权建议"之类；不看好照常给推荐（看跌价差，或持股时先减仓） | 写 `.md` + `.json` |
 | 1 | 数据源或行情失败，或缺必要数据（如"找不到合约"） | 什么都没写 |
 | 2 | 参数错误 | 什么都没写 |
 | 3 | 没有可用的论点，需要用户给看法 | 什么都没写 |
@@ -56,7 +56,8 @@ Read `data/config.md` and extract the `lang` field (default `zh`). If `--lang zh
    - **权利金薄**（IV 低或低于类别阈值）：小仓位或等 IV 回升。
    - **论点过期**（thesis 超过期限未更新）和 **看法冲突**（用户指定与 wiki 状态不一致）。
    - **"代理"**：IV 位置是代理——平值 IV 对自己过去一年的 21 日实现波动率分布做百分位，不是真正的 IV Rank / IV 百分位（数据源没有 IV 历史）；IV 缺失时退到实现波动率自比，是再退一步的代理。**±15% 内行权价个数是全链合并计数，也是代理**，可能多算。
-   - 财报：热门股到期日必须早于财报日，财报在 7 天内第一推荐会变成"等财报后再看"；日期未知也要警告。ETF 看除息日。
+   - 财报：热门股到期日必须早于财报日，财报在 7 天内第一推荐会变成"等财报后再看"（不看好未持有时变成"等财报后再看 + Bear Put 价差"，Bear Call 价差让位）；日期未知也要警告。ETF 看除息日。
+   - **看跌推荐的三条提示**（只提示，不改推荐和排名）：不看好但近一年走势是稳步上涨 → "看跌价差是逆势单"；Bear Put 价差遇到 IV 偏高 → "买方付的权利金偏贵"；每次推荐看跌价差都带一条"历史上市场整体向上漂移，看跌策略样本里亏的概率偏高"。
    - 历史不足一年、数据缺口、持股不足 100 股（备兑 Call / Collar 做不了，改走未持有分支）、`data/positions.md` 不存在（视为未持有）、没有期权数据（门槛出局）。
 3. **组合占比标记**：现金担保 Put 或 Bull Put 排名由"参考行权价 × 100 占组合约 x%"和类别决定。报告里这个占比挂在其中一个推荐的标记上：`portfolio_share=<两位小数>`（如 `0.16`，报告写"占组合约 16%"）；组合总值取不到时标 `rank_by_class_only`，意思是只按类别排序。**只转述百分比，不要报组合总值**（文件里只写取整后的占比，组合总值本身不写）。
 4. **为什么不选**：每个未选策略一句理由和策略页链接，简要带过。
@@ -65,21 +66,25 @@ Read `data/config.md` and extract the `lang` field (default `zh`). If `--lang zh
 
    | 下一步 | 怎么带过去 | 限制 |
    |--------|------------|------|
-   | 现金担保 Put：`/put-screen suggest --dte monthly` | 加 `--tickers ZZZQ` 只筛这一只；目标 0.15 时再加 `--delta 0.15`（目标 0.20 不用加） | `--tickers` 绕过 wiki 的 Avoid / 复核中状态；仍要求收盘价在 MA200 之上、到期前无财报，价差过宽时往外最多走到 0.10 或目标（取小者），所以远价外和"下行"的情形它**可能剔掉这只票** |
-   | Bull Put 价差：`/spread-sim suggest ZZZQ` | 先 `suggest`，再 `open ZZZQ 0.15`（或更价外的 `open ZZZQ 0.10`） | 只有 0.20 / 0.15 / 0.10 三档，目标会就近放进这三档 |
-   | Bull Call 价差：`/bullcall-sim suggest ZZZQ` | 先 `suggest`，再 `open ZZZQ 0.60`（或更便宜的 `open ZZZQ 0.50`） | 买方策略，净支出全亏的风险 |
-   | 铁鹰：`/condor-sim suggest ZZZQ` | 先 `suggest`，再 `open ZZZQ 0.15` | 大涨对铁鹰是满额亏损 |
-   | 备兑 Call：`/call-screen suggest --dte monthly` | 目标 0.15 时加 `--delta 0.15` | 它不接 ticker，扫全部持股，`--delta` 对这次扫的每只持股都生效；价差过宽时往外最多走到 0.10 或目标（取小者），可能不出这只票 |
+   | 现金担保 Put：`/put-screen suggest --dte monthly` | 加 `--tickers ZZZQ` 只筛这一只；目标 0.15 时再加 `--delta 0.15`（目标 0.20 不用加）；或一步到位 `/put-screen suggest --dte monthly --from-pick ZZZQ` | `--tickers` 绕过 wiki 的 Avoid / 复核中状态；仍要求收盘价在 MA200 之上、到期前无财报，价差过宽时往外最多走到 0.10 或目标（取小者），所以远价外和"下行"的情形它**可能剔掉这只票** |
+   | Bull Put 价差：`/spread-sim suggest ZZZQ` | 先 `suggest`，再 `open ZZZQ 0.15`（或更价外的 `open ZZZQ 0.10`）；第二步也可以写 `open ZZZQ --from-pick` | 只有 0.20 / 0.15 / 0.10 三档，目标会就近放进这三档 |
+   | Bull Call 价差：`/bullcall-sim suggest ZZZQ` | 先 `suggest`，再 `open ZZZQ 0.60`（或更便宜的 `open ZZZQ 0.50`）；第二步也可以写 `open ZZZQ --from-pick` | 买方策略，净支出全亏的风险 |
+   | Bear Put 价差：`/bearput-sim suggest ZZZQ` | 先 `suggest`，再 `open ZZZQ 0.60`（或更便宜的 `open ZZZQ 0.50`）；第二步也可以写 `open ZZZQ --from-pick` | 买方策略，净支出可能全亏（到期不跌到长腿之下就亏光） |
+   | Bear Call 价差：`/bearcall-sim suggest ZZZQ` | 先 `suggest`，再 `open ZZZQ 0.15`（或更价外的 `open ZZZQ 0.10`）；第二步也可以写 `open ZZZQ --from-pick` | 卖方策略，上涨亏钱、最大亏损是宽度减权利金 |
+   | 铁鹰：`/condor-sim suggest ZZZQ` | 先 `suggest`，再 `open ZZZQ 0.15`；第二步也可以写 `open ZZZQ --from-pick` | 大涨对铁鹰是满额亏损 |
+   | 备兑 Call：`/call-screen suggest --dte monthly` | 目标 0.15 时加 `--delta 0.15`；或 `/call-screen suggest --dte monthly --from-pick ZZZQ` | 它不接 ticker，扫全部持股，`--delta` 对这次扫的每只持股都生效；价差过宽时往外最多走到 0.10 或目标（取小者），可能不出这只票 |
    | Collar / 保护性 Put：`/collar-screen suggest` | **带不过去**：它不按 Delta 选，按现价 90% / 85% / 80% 三档列出 Put（Collar 的 Call 取零成本） | Delta 目标带不过去；对照报告里的"参考价位"，挑最接近的一档 |
    | 不做 / 继续持有 / 减仓 | 无，或 `/stock-review TICKER` | — |
 
    `/put-screen` 和 `/call-screen` 的 `--delta` 范围是 0.05–0.40、最多两位小数，默认 0.20；`/put-screen` 接 `--tickers`，`/call-screen`、`/collar-screen` 不接 ticker。
 
+   **`--from-pick` 捷径**：上表里的 `--from-pick` 写法让下游命令自己读这份结果，得出的 `--delta` / 档位与交接行印出来的完全相同（同一套映射），用户不用手抄。它**只读今天**的 `data/strategy-picks/<今天>-<TICKER>.json`：今天没跑过 `/strategy-pick`、结果是昨天的（过了午夜也算）、文件格式不对、推荐里没有那个策略，都会拒绝（退出码 2，什么都不写），不会回落到更早的结果；这时先重跑 `/strategy-pick ZZZQ`。`/put-screen` 的 `--from-pick` 不能和 `--tickers`、`--delta` 同用，`/call-screen` 的不能和 `--delta` 同用，`open` 的档位与 `--from-pick` 二选一。手抄的写法照样可用，交接行仍按原样转给用户。
+
 7. 提醒：工具只给策略方向和参考区间，**不选合约、不推荐具体档位**；样本局限（一年只是一个行情阶段，高低 IV 是对自己过去一年比，工具不预测方向）报告里有固定一节。
 
 **特殊结论的说法**：
 - 门槛出局（流动性不够）：说"不做期权建议"和具体哪一项没过，不要换个策略凑一个。
-- 不看好：不出任何看涨策略；已有单账户 ≥ 100 股时只提示考虑减仓（`/stock-review`、`/stock-exit`）或用 Collar 锁下限（`/collar-screen`）；不足 100 股不提 Collar。
+- 不看好：只推荐有限风险的看跌价差（或先减仓），没有看涨策略。未持有或单账户不足 100 股时，第一 Bear Put 价差、第二 Bear Call 价差（持股不足一张时另有"考虑减仓"的提示）；单账户 ≥ 100 股时，第一考虑减仓（`/stock-review`、`/stock-exit`），第二 Bear Put 价差，Collar（`/collar-screen`）只在提示里提一句、不是推荐。买入 Put 单腿不推荐，"为什么不选"里写明需要时手动用 `/longput-sim`。
 - 历史不足：不分类、不给策略、不算 IV 位置，文件仍会写。
 
 **退出码 1（失败）**：脚本打印"错误：…（什么都没写）"。原样转述错误，并说明：

@@ -21,6 +21,7 @@ Natural language or explicit. Parse into one of five actions:
 | Action | Example input | Script call |
 |--------|---------------|-------------|
 | suggest | "筛一遍 covered call" / "我的持股能卖哪些 call" / "月度的" | `suggest [--dte weekly\|monthly] [--delta X]` — 默认 weekly；对整张持股表出候选，不需要传 ticker，不写账本。用户明确要月度才传 `--dte monthly`。`--delta X` 改短 Call 的目标 Delta：0.05–0.40、最多两位小数（0.125、0.5 等直接拒绝，退出码 2），默认 0.20；买卖价差过宽时往行权价更高处最多走到 0.10 或目标（取小者），所以目标 0.10 及以下不往外走。非默认时规则行和逐只候选 JSON（`target_delta`）会写明目标，`open` 把它记进账本的 `delta_target`。文件名不带 Delta，同一天换 `--delta` 重跑会覆盖当天的候选与汇总，与换 `--dte` 一样 |
+| suggest（按推荐） | "按 /strategy-pick 的推荐筛 call" | `suggest [--dte weekly\|monthly] --from-pick TICKER` — 等于 `--delta <推荐的目标>`，Delta 取今天 `/strategy-pick TICKER` 备兑 Call 推荐的区间上端，与报告里交接行同一个数；**仍扫全部持股**（它不接 ticker），控制台多一行 `按 /strategy-pick <日期> 的结果：Delta 目标 … → --delta …；它扫全部持股，…`。不能和 `--delta` 同用（退出码 2）；`--dte` 照旧自己选。只读**今天**的 `data/strategy-picks/<今天>-<TICKER>.json`（demo 数据源读其下 `demo/`）：今天没跑过、文件是旧的、格式不对、推荐里没有备兑 Call，都直接拒绝（退出码 2，什么都不写），不会回落到更早的结果；先重跑 `/strategy-pick TICKER` |
 | open | "AAA 开一张 call" / "假设持仓 3 卖 2 张" | `open TICKER [--lot real\|<ID>] [--contracts N]` — 记录已保存的候选，默认 1 张；同一 ticker 有多个持仓候选时必须用 `--lot` 指定 |
 | status | "看一下模拟盘" / "周中检查" | `status` |
 | close | "提前平仓 #7" | `close ID` |

@@ -59,6 +59,8 @@ BASE_CONSTANTS = ("LOOKBACK_DAYS", "MIN_HISTORY_DAYS", "MIN_SLOPE_DAYS", "MA_SHO
                   "RECENT_RV_RATIO_HIGH", "RECENT_RV_RATIO_LOW")
 TARGET_CONSTANTS = ("NORMAL_DELTA", "FAR_OTM_DELTA", "BULLCALL_LONG_DELTA", "CONDOR_SHORT_DELTA",
                     "COLLAR_PUT_DELTA", "COLLAR_CALL_DELTA", "Z_BY_DELTA", "REF_DECIMALS")
+# Listed only when a bear spread is picked, so the bull / neutral `thresholds_used` stay as they were.
+BEAR_TARGET_CONSTANTS = ("BEARPUT_LONG_DELTA", "BEARCALL_SHORT_DELTA")
 RANK_CONSTANTS = ("CSP_MAX_PORTFOLIO_SHARE", "CSP_FIRST_CLASSES", "CONTRACT_MULTIPLIER")
 
 
@@ -113,6 +115,8 @@ def thresholds_used(f: RunFacts) -> dict:
     names = list(tier) + _evidence_constants(f) + list(BASE_CONSTANTS)
     if any(p.delta_target for p in f.decision.picks):
         names += TARGET_CONSTANTS
+    if any(p.strategy in R.BEAR_PICKS for p in f.decision.picks):
+        names += BEAR_TARGET_CONSTANTS
     if f.decision.rank_basis is not None:
         names += RANK_CONSTANTS
     used = {n: _jsonable(tier[n] if n in tier else getattr(R, n)) for n in dict.fromkeys(names)}

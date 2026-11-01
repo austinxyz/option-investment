@@ -13,6 +13,10 @@
 | `/collar-screen` | Collar / 保护性 Put：给假设持股设下限 |
 | `/condor-sim` | 铁鹰：三档候选、开仓 |
 | `/bullcall-sim` | Bull Call 借方价差：三档候选、开仓 |
+| `/rr-sim` | 风险反转（卖虚值 Put + 买虚值 Call）：三档候选、开仓；下行接近裸卖 Put |
+| `/bearcall-sim` | Call 贷方价差（看跌卖方）：三档候选、开仓；上涨亏钱，`/strategy-pick` 在不看好时推荐（`open TICKER --from-pick`） |
+| `/bearput-sim` | Put 借方价差（看跌买方）：三档候选、开仓；`/strategy-pick` 在不看好时推荐（`open TICKER --from-pick`） |
+| `/longput-sim` | 买入 Put（单腿看跌）：三档候选、开仓；Theta 抽水，只能手动用，`/strategy-pick` 不推荐 |
 | `/paper-book` | 账本总入口：`status`（浮动盈亏 + 到期结算）、`close ID`、`report` |
 | `/option-review` | 每周给每笔未平仓的单子一个建议，存快照 |
 | `/option-journal` | 复盘：历次建议和最终结果对比 |

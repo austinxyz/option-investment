@@ -36,9 +36,35 @@ NO_SETTLED_EXCEPT_BULLCALL = (f"除 {ledger_mod.BULLCALL_LABEL}外暂无已结�
 NO_SETTLED_EXCEPT_OWN_BLOCKS = (f"除铁鹰与 {ledger_mod.BULLCALL_LABEL}外暂无已结算持仓"
                                 "（各自见下方的块）")
 BULLCALL_NOTE_HIDDEN = f"提示：{ledger_mod.BULLCALL_LABEL}的笔记只存进笔记文件，复盘报告里不显示"
+NO_SETTLED_EXCEPT_RR = (f"除 {ledger_mod.RR_LABEL}外暂无已结算持仓"
+                        f"（{ledger_mod.RR_LABEL}见下方其块）")
+RR_NOTE_HIDDEN = f"提示：{ledger_mod.RR_LABEL}的笔记只存进笔记文件，报告里不显示"
+# The three bearish strategies: (report key, display label), in header / block order.
+BEARISH_BLOCKS = ((ledger_mod.STRATEGY_BEAR_CALL, ledger_mod.BEARCALL_LABEL),
+                  (ledger_mod.STRATEGY_BEAR_PUT, ledger_mod.BEARPUT_LABEL),
+                  (ledger_mod.STRATEGY_LONG_PUT, ledger_mod.LONGPUT_LABEL))
+
+
+def _hidden_notice(label: str) -> str:
+    return f"提示：{label}的笔记只存进笔记文件，报告里不显示"
+
+
+def _only_one_settled(label: str) -> str:
+    return f"除 {label}外暂无已结算持仓（{label}见下方其块）"
+
+
 # Strategies whose notes never reach a timeline (they have their own block instead).
 NOTE_HIDDEN = {ledger_mod.STRATEGY_IRON_CONDOR: CONDOR_NOTE_HIDDEN,
-               ledger_mod.STRATEGY_BULL_CALL: BULLCALL_NOTE_HIDDEN}
+               ledger_mod.STRATEGY_BULL_CALL: BULLCALL_NOTE_HIDDEN,
+               ledger_mod.STRATEGY_RR: RR_NOTE_HIDDEN,
+               **{key: _hidden_notice(label) for key, label in BEARISH_BLOCKS}}
+# Own-block strategies in header order: (report key, label used when the sentence names them).
+OWN_BLOCKS = ((ledger_mod.STRATEGY_IRON_CONDOR, "铁鹰"),
+              (ledger_mod.STRATEGY_BULL_CALL, ledger_mod.BULLCALL_LABEL),
+              (ledger_mod.STRATEGY_RR, ledger_mod.RR_LABEL), *BEARISH_BLOCKS)
+# When exactly one of these is the only thing settled, its own sentence is used.
+NO_SETTLED_ONLY = {ledger_mod.STRATEGY_RR: NO_SETTLED_EXCEPT_RR,
+                   **{key: _only_one_settled(label) for key, label in BEARISH_BLOCKS}}
 # Allowlist, not "everything but covered calls": a new strategy must opt in to A-D explicitly.
 PUT_STATS_STRATEGIES = (ledger_mod.STRATEGY_BULL_PUT, ledger_mod.STRATEGY_CSP)
 CONDOR_BREACHED_LABEL = {**ledger_mod.BREACHED_SIDE_LONG_LABELS, "unrecorded": "未记录"}
@@ -208,6 +234,15 @@ def build_report(records: list[dict], snapshots: list[dict], notes: dict,
     bullcall = stats.bullcall_stats(records)
     if bullcall:
         report[ledger_mod.STRATEGY_BULL_CALL] = bullcall
+    rr = stats.rr_stats(records)
+    if rr:
+        report[ledger_mod.STRATEGY_RR] = rr
+    for key, fn in ((ledger_mod.STRATEGY_BEAR_CALL, stats.bearcall_stats),
+                    (ledger_mod.STRATEGY_BEAR_PUT, stats.bearput_stats),
+                    (ledger_mod.STRATEGY_LONG_PUT, stats.longput_stats)):
+        block = fn(records)
+        if block:
+            report[key] = block
     return report
 
 
@@ -248,17 +283,31 @@ def _own_block_count_lines(report: dict) -> list[str]:
     bullcall = _block_settled(report, ledger_mod.STRATEGY_BULL_CALL)
     if bullcall:
         lines.append(f"另有 {ledger_mod.BULLCALL_LABEL}已结算 {bullcall} 笔，见其块")
+    rr = _block_settled(report, ledger_mod.STRATEGY_RR)
+    if rr:
+        lines.append(f"另有 {ledger_mod.RR_LABEL}已结算 {rr} 笔，见其块")
+    for key, label in BEARISH_BLOCKS:
+        n = _block_settled(report, key)
+        if n:
+            lines.append(f"另有 {label}已结算 {n} 笔，见其块")
     return lines
 
 
 def _no_settled(report: dict) -> str:
-    condor = _block_settled(report, ledger_mod.STRATEGY_IRON_CONDOR)
-    bullcall = _block_settled(report, ledger_mod.STRATEGY_BULL_CALL)
+    """Only own-block strategies settled: say so and point at their blocks."""
+    present = [key for key, _ in OWN_BLOCKS if _block_settled(report, key)]
+    if not present:
+        return NO_SETTLED
+    if any(key in NO_SETTLED_ONLY for key in present):  # risk reversal or a bearish strategy
+        if len(present) == 1:
+            return NO_SETTLED_ONLY[present[0]]
+        names = "、".join(label for key, label in OWN_BLOCKS if key in present)
+        return f"除{names}外暂无已结算持仓（各自见下方的块）"
+    condor = ledger_mod.STRATEGY_IRON_CONDOR in present
+    bullcall = ledger_mod.STRATEGY_BULL_CALL in present
     if condor and bullcall:
         return NO_SETTLED_EXCEPT_OWN_BLOCKS
-    if bullcall:
-        return NO_SETTLED_EXCEPT_BULLCALL
-    return NO_SETTLED_EXCEPT_CONDOR if condor else NO_SETTLED
+    return NO_SETTLED_EXCEPT_BULLCALL if bullcall else NO_SETTLED_EXCEPT_CONDOR
 
 
 def _render_header(report: dict) -> list[str]:
@@ -404,6 +453,64 @@ def _render_bullcall(report: dict) -> list[str]:
     return lines
 
 
+def _render_rr(report: dict) -> list[str]:
+    b = report.get(ledger_mod.STRATEGY_RR)
+    if not b:
+        return []
+    label = ledger_mod.RR_LABEL
+    lines = [f"## {label}（单独统计，不计入 A–D 与阈值重算）", ""]
+    lines += _sample(b["n"], f"已结算 {label}")
+    lines.append(f"赢 {b['wins']} 笔，胜率：{_pct1(b['win_rate'])}，期权腿总盈亏：{_money(b['total_pnl'])}"
+                 "（不含股票腿）")
+    zones = b["zones"]
+    lines.append(f"结局：上方 {zones['up']} 笔，死区 {zones['dead']} 笔，"
+                 f"下方（被指派）{zones['down']} 笔"
+                 + (f"，提前平仓未分区 {b['no_zone']} 笔" if b["no_zone"] else ""))
+    lines.append(f"下行（被指派）笔的平均期权腿盈亏：{_money_or_dash(b['avg_down_pnl'])}"
+                 "；真实情况下会按 Put 行权价接股，本工具不模拟股票腿")
+    return lines
+
+
+def _bearish_head(report: dict, key: str, label: str) -> tuple[dict | None, list[str]]:
+    """(block, head lines incl. sample + win line), or (None, []) when nothing settled."""
+    b = report.get(key)
+    if not b:
+        return None, []
+    lines = [f"## {label}（看跌，单独统计，不计入 A–D 与阈值重算）", ""]
+    lines += _sample(b["n"], f"已结算 {label}")
+    lines.append(f"赢 {b['wins']} 笔，胜率：{_pct1(b['win_rate'])}，总盈亏：{_money(b['total_pnl'])}")
+    return b, lines
+
+
+def _render_bearcall(report: dict) -> list[str]:
+    b, lines = _bearish_head(report, ledger_mod.STRATEGY_BEAR_CALL, ledger_mod.BEARCALL_LABEL)
+    if not b:
+        return []
+    lines.append(f"所需胜率（逐笔平均，1 − 权利金 ÷ 宽度）：{_pct(b['required_avg'])}"
+                 "；与按实际盈亏比算的盈亏平衡胜率口径不同")
+    return lines
+
+
+def _render_bearput(report: dict) -> list[str]:
+    b, lines = _bearish_head(report, ledger_mod.STRATEGY_BEAR_PUT, ledger_mod.BEARPUT_LABEL)
+    if not b:
+        return []
+    lines.append(f"所需胜率（逐笔平均，净支出 ÷ 宽度）：{_pct(b['required_avg'])}"
+                 "；与按实际盈亏比算的盈亏平衡胜率口径不同")
+    lines.append(f"赢的笔平均捕获最大收益的 {_pct1(b['captured_avg_winners'])}")
+    return lines
+
+
+def _render_longput(report: dict) -> list[str]:
+    b, lines = _bearish_head(report, ledger_mod.STRATEGY_LONG_PUT, ledger_mod.LONGPUT_LABEL)
+    if not b:
+        return []
+    loss = DASH if b["avg_loss"] is None else f"${b['avg_loss']:,.0f}"
+    lines.append(f"平均赢额：{_money_or_dash(b['avg_win'])}，平均亏额：{loss}"
+                 "（单腿买方收益无上限，看平均赢额与平均亏额之比）")
+    return lines
+
+
 def _render_timeline(t: dict) -> list[str]:
     result = t["result"] or DASH
     lines = [f"### #{t['id']} {t['strategy']} {t['ticker']} {t['strikes']} "
@@ -454,7 +561,8 @@ FOOTER = [
 def render_journal_md(report: dict) -> str:
     sections = [_render_header(report), _render_stats(report), _render_sweeps(report),
                 _render_covered_call(report), _render_lot_put(report), _render_condor(report),
-                _render_bullcall(report), _render_timelines(report),
+                _render_bullcall(report), _render_rr(report), _render_bearcall(report),
+                _render_bearput(report), _render_longput(report), _render_timelines(report),
                 _render_open(report), ["---"] + FOOTER]
     sections = [s for s in sections if s]
     return "\n\n".join("\n".join(s) for s in sections) + "\n"

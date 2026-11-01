@@ -2,6 +2,7 @@
 """Covered-call paper screen — CLI.
 
     call_screen.py suggest [--dte {weekly,monthly}] [--delta X]  # screen held lots, save candidates (no ledger write)
+    call_screen.py suggest [--dte ...] --from-pick TICKER  # Delta from today's /strategy-pick (still all lots)
     call_screen.py open TICKER [--lot real|ID] [--contracts N]  # records the saved candidate
     call_screen.py status | close ID                 # shared with spread_sim
     call_screen.py shares add TICKER --shares N --cost C | list | remove ID
@@ -29,6 +30,7 @@ import put_screen_rules
 import spread_data
 import spread_ledger as ledger_mod
 import spread_sim
+import strategy_pick_frompick as frompick
 
 SUGGESTIONS_DIR = "suggestions"
 SUMMARY_DIR = "call-screen"
@@ -440,8 +442,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--dte", choices=("weekly", "monthly"), default=DEFAULT_DTE,
                    help="到期类型：weekly = 7–14 天最近到期（默认），monthly = 30–45 天月度")
     s.add_argument("--delta", type=rules.delta_arg, default=rules.TARGET_DELTA, metavar="0.15",
+                   action=frompick.StoreGiven,
                    help="短 Call 的目标 Delta（0.05–0.40，最多两位小数；默认 0.20）；"
                         "价差过宽时往外最多走到 0.10 或目标（取小者）")
+    s.add_argument("--from-pick", type=spread_sim._ticker_arg, default=None, metavar="TICKER",
+                   help="Delta 用今天 /strategy-pick TICKER 的备兑 Call 目标（不能和 --delta 同用）；"
+                        "仍扫全部持股")
     o = sub.add_parser("open", help="记录已保存的候选")
     o.add_argument("ticker", type=spread_sim._ticker_arg)
     o.add_argument("--lot", type=_lot_arg, default=None, help="real 或假设持仓编号")
@@ -457,10 +463,34 @@ COMMANDS = {"suggest": cmd_suggest, "open": cmd_open, "status": cmd_status,
             "close": cmd_close, "shares": cmd_shares}
 
 
+FROM_PICK_EXCLUSIVE = "--from-pick 不能和 --delta 一起用：Delta 从今天的推荐里读"
+
+
+def _from_pick(parser: argparse.ArgumentParser, args, today: date) -> str | None:
+    """Fill --delta from today's covered-call pick; the console line, or None."""
+    if getattr(args, "from_pick", None) is None:
+        return None
+    if getattr(args, "delta_given", False):
+        parser.error(FROM_PICK_EXCLUSIVE)
+    _ticker, args.delta, line = frompick.screen_from_pick(args.from_pick, "covered_call", today)
+    return line
+
+
 def main(argv: list[str] | None = None, today: date | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        pick_line = _from_pick(parser, args, today or date.today())
+    except frompick.FromPickError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return frompick.EXIT_FROM_PICK
+    except option_settings.SettingsError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 1
     try:
         option_labels.print_console_header()
+        if pick_line:
+            print(pick_line)
         ledger_dir = spread_sim.resolve_ledger_dir(args.ledger_dir)
         return COMMANDS[args.cmd](args, ledger_dir, today or date.today())
     except (spread_data.DataError, ledger_mod.LedgerError, option_settings.SettingsError) as exc:

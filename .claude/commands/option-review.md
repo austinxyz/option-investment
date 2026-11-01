@@ -1,6 +1,6 @@
 # option-review
 
-每周检查模拟盘里所有未平仓的期权持仓（Bull Put Credit Spread、现金担保 Sell Put、备兑 Covered Call、保护性 Put / Collar 和铁鹰 Iron Condor；铁鹰和 Call 借方价差的规则见下方“规则”一节各自的段落），按固定规则给每笔一个建议：继续持有 / 需要关注 / 平仓 / 等待结算，并附理由。把当次结论连同所用阈值存成快照，方便日后拿建议和持仓最终盈亏对照。
+每周检查模拟盘里所有未平仓的期权持仓（Bull Put Credit Spread、现金担保 Sell Put、备兑 Covered Call、保护性 Put / Collar 和铁鹰 Iron Condor；铁鹰、Call 借方价差、风险反转和三种看跌策略——Call 贷方价差、Put 借方价差、买入 Put——的规则见下方“规则”一节各自的段落），按固定规则给每笔一个建议：继续持有 / 需要关注 / 平仓 / 等待结算，并附理由。把当次结论连同所用阈值存成快照，方便日后拿建议和持仓最终盈亏对照。
 
 **只给建议，不平仓、不改账本、不碰 `data/positions.md` / `outputs/` / `wiki/`。** 脚本只读 `data/paper-trading/spreads.json`，结果只写进 `data/paper-trading/reviews/`（gitignored，私有）。真正平仓由用户决定，用 `put_screen.py close ID`（见 `.claude/commands/put-screen.md`）。
 
@@ -30,6 +30,14 @@
 **铁鹰**（`strategy` 为 iron_condor）也在检查范围内，四条腿按各自行权价取报价：规则顺序和阈值同上，**两侧任一侧出事都算**。第 2 条：现价跌破短 Put 或涨过短 Call 即价内（正好等于短腿行权价不算），或已到止损标记；短 Call 价内且除息日在到期前时，理由会加上提前指派风险。第 3 条的已赚比例按净权利金算。第 4 条：任一条短腿 Delta ≥ 0.35 即关注。第 5 条的“等它自然到期归零”要求两条短腿的 Delta 都 ≤ 0.10。任一条腿取不到有效报价时按第 0 条处理。平仓用 `condor_sim.py close ID`（见 `.claude/commands/condor-sim.md`），同样不要自己执行。实现见 `scripts/put_review_rules.py` 的 `review_condor`。
 
 **Call 借方价差**（`strategy` 为 bull_call_spread，买方）也在检查范围内，长腿、短腿按各自行权价取报价，**用的是买方规则，不是上面的卖方规则**，也**不用 Delta 规则**（长腿 Delta 只记在快照里供参考）。第一个命中的算：任一腿取不到有效报价 → 需要关注（第 0 条）；浮亏已达净支出的 50% → 需要关注（第 2 条）；**短腿严格价内（现价高于短腿行权价）且除息日在到期前 → 需要关注（提前指派风险，考虑平仓；规则编号 4，但先于下一条检查，否则这个理由永远显示不出来）**；浮盈达最大收益的 50%，或现价到达或高于短腿行权价 → 平仓（第 3 条）；到期前有财报、剩余 ≤ 10 天且浮盈 ≤ 0、剩余 ≤ 5 天且现价严格落在两腿之间 → 需要关注（第 4 条）；其余继续持有。平仓用 `bullcall_sim.py close ID`（见 `.claude/commands/bullcall-sim.md`），同样不要自己执行。实现见 `scripts/put_review_rules.py` 的 `review_bullcall`。
+
+**风险反转**（`strategy` 为 risk_reversal，卖虚值 Put + 买虚值 Call）也在检查范围内，短 Put、长 Call 按各自行权价取报价，**用的是它自己的规则，不是上面的卖方规则**，阈值用现有常量、不新增。第一个命中的算：任一腿取不到有效报价 → 需要关注（第 0 条）；到期日当天或已过 → 等待结算（第 1 条）；**短 Put 价内（现价严格低于 Put 行权价）或已到止损线（浮亏≥短 Put 权利金的 2 倍）→ 需要关注（第 2 条），理由写“可能被指派（按 Put 行权价接股）；由你决定接受还是买回”**；已到止盈线（浮盈≥短 Put 权利金的 1 倍）→ 平仓（第 3 条）；到期前有财报，或短 Put 的 |Delta| ≥ 0.35（`ATTENTION_DELTA`，仅数据可信时）→ 需要关注（第 4 条）；其余继续持有（第 5 条）。财报日期未知、数据陈旧（Delta 未使用）的提示照旧保留。价内检查排在止盈之前，因为被指派风险比赚到的钱重要。平仓用 `rr_sim.py close ID`（见 `.claude/commands/rr-sim.md`），同样不要自己执行。实现见 `scripts/put_review_rules.py` 的 `review_rr`。
+
+**Call 贷方价差**（`strategy` 为 bear_call_spread，卖方，看跌）也在检查范围内，短 Call、长 Call 按各自行权价取报价，**用上面的卖方顺序和四个阈值，方向取反**：任一腿取不到有效报价 → 需要关注（第 0 条）；到期日当天或已过 → 等待结算（第 1 条）；**价内（现价严格高于短腿 Call 行权价，正好等于不算）**或已到止损标记 → 需要关注（第 2 条），短腿价内且除息日在到期前时理由加上提前指派风险；已赚比例 ≥ 80% → 平仓（第 3 条）；到期前有财报，或短腿 Call Delta ≥ 0.35（仅数据可信时）→ 需要关注（第 4 条）；其余继续持有（第 5 条，剩余 ≤ 5 天且短腿 Delta ≤ 0.10 时写“等它自然到期归零”）。平仓用 `bearcall_sim.py close ID`（见 `.claude/commands/bearcall-sim.md`），同样不要自己执行。实现见 `scripts/put_review_rules.py` 的 `review_bearcall`。
+
+**Put 借方价差**（`strategy` 为 bear_put_spread，买方，看跌）也在检查范围内，长 Put、短 Put 按各自行权价取报价，**用买方规则（镜像 Call 借方价差），不用 Delta 规则，也没有除息日提前指派的例外**（买入的 Put 不会被指派）：任一腿取不到有效报价 → 需要关注（第 0 条）；到期日当天或已过 → 等待结算（第 1 条）；浮亏已达净支出的 50% → 需要关注（第 2 条）；浮盈达最大收益的 50%，或现价跌到短腿行权价或以下 → 平仓（第 3 条）；到期前有财报、剩余 ≤ 10 天且浮盈 ≤ 0、剩余 ≤ 5 天且现价严格落在两腿之间 → 需要关注（第 4 条）；其余继续持有（第 5 条）。平仓用 `bearput_sim.py close ID`（见 `.claude/commands/bearput-sim.md`），同样不要自己执行。实现见 `scripts/put_review_rules.py` 的 `review_bearput`。
+
+**买入 Put**（`strategy` 为 long_put，单腿买方，看跌）也在检查范围内，按行权价取报价，**不用 Delta 规则，也没有除息日规则**：取不到有效报价 → 需要关注（第 0 条）；到期日当天或已过 → 等待结算（第 1 条）；浮亏已达净支出的 50% → 需要关注（第 2 条）；浮盈达净支出的 100% → 平仓（第 3 条）；到期前有财报（IV 压缩与事件风险）、剩余 ≤ 10 天且浮盈 ≤ 0、剩余 ≤ 5 天且现价仍在行权价或以上（价外）→ 需要关注（第 4 条）；其余继续持有（第 5 条）。平仓用 `longput_sim.py close ID`（见 `.claude/commands/longput-sim.md`），同样不要自己执行。实现见 `scripts/put_review_rules.py` 的 `review_longput`。
 
 第 3 条排在第 4 条之前：已赚 80% 且有财报时建议平仓，而不是只"关注"。
 

@@ -19,6 +19,7 @@ from strategy_pick_tree import (DecisionContext, IvPosition, NeedsView, decide, 
 P, B, BC, IC = "cash_secured_put", "bull_put_spread", "bull_call_spread", "iron_condor"
 CC, COL, PP, H = "covered_call", "collar", "protective_put", "hold"
 NO, W, R = "no_options", "wait_earnings", "reduce_position"
+BP, BCS = "bear_put_spread", "bear_call_spread"
 FAR, THIN, WIN = "far_otm", "thin_premium", "required_win_rate"
 WANT, AVG, EARN, REDUCE = "want_shares_only", "premium_average", "earnings_before_expiry", "reduce_hint"
 
@@ -131,6 +132,9 @@ _SPEC_DELTAS = {
     (IC, False): (("short_put", 0.15, 0.15), ("short_call", 0.15, 0.15)),
     (COL, False): (("long_put", 0.20, 0.30), ("short_call", 0.20, 0.20)),
     (PP, False): (("long_put", 0.20, 0.30),),
+    # 2026-10-30 bearish design: Bear Put long put 0.50-0.60, Bear Call short call 0.10-0.15.
+    (BP, False): (("long_put", 0.50, 0.60),),
+    (BCS, False): (("short_call", 0.10, 0.15),),
 }
 
 
@@ -144,6 +148,13 @@ def warn(key: str, **kw) -> str:
 
 NO_LOT_WARN = warn("no_lot", max_lot=60, lot=100)
 REDUCE_WARN = warn("reduce_hint", lot=100)
+
+
+def _bear_trend_warns(regime, iv) -> list[str]:
+    """Bear leaves warn (never re-rank): against a steady rise, Bear Put on high IV, the drift."""
+    out = [warn("bear_against_trend")] if regime == "steady_up" else []
+    out += [warn("bear_put_iv_high")] if iv == "high" else []
+    return out + [warn("bear_drift")]
 
 
 def _combination_rows() -> list[dict]:
@@ -161,12 +172,15 @@ def _expected_row(view, holding, regime, iv) -> dict:
     ctx = make_ctx(view, holding, regime, iv)
     # 6.11: no single account >= 100 shares -> no-lot warning; neutral / bear add the reduce hint
     no_lot = [NO_LOT_WARN] if holding == "held_no_lot" else []
-    if view == "bear":  # 6.8 bear: held lot -> reduce + collar; otherwise no options
+    if view == "bear":  # 2026-10-30: held lot -> reduce + Bear Put; otherwise Bear Put + Bear Call
+        trend = _bear_trend_warns(regime, iv)
         if holding == "held":
-            return _row(rid, ctx, "bear.held", [R, COL], warns=[warn("bear_held")])
-        flags = {NO: {REDUCE}} if holding == "held_no_lot" else {}
+            return _row(rid, ctx, "bear.held", [R, BP], warns=[warn("bear_held")] + trend)
+        flags = {BP: {REDUCE}} if holding == "held_no_lot" else {}
+        absent = {BCS: {REDUCE}}
         reduce = [REDUCE_WARN] if no_lot else []
-        return _row(rid, ctx, "bear.not_held", [NO], flags, warns=no_lot + reduce)
+        return _row(rid, ctx, "bear.not_held", [BP, BCS], flags, absent,
+                    warns=[warn("bear_not_held")] + trend + no_lot + reduce)
     branch = "held" if holding == "held" else "not_held"  # 6.11: no lot -> not-held branch
     picks, flags = EXPECTED[(view, branch, regime, iv)]
     flags = {k: set(v) for k, v in flags.items()}
@@ -247,8 +261,9 @@ def _variant_rows() -> list[dict]:
              "neutral.not_held.steady_up.high", [P, B], {P: {FAR}, B: {FAR}}),
         _row("V6", make_ctx("bull", "not_held", "steady_up", "high", gate_passed=False),
              "gate_fail", [NO]),
-        _row("V7", make_ctx("bear", "held", "steady_up", "high"), "bear.held", [R, COL],
-             warns=[warn("bear_held")]),
+        _row("V7", make_ctx("bear", "held", "steady_up", "high"), "bear.held", [R, BP],
+             warns=[warn("bear_held"), warn("bear_against_trend"), warn("bear_put_iv_high"),
+                    warn("bear_drift")]),
         _row("V8", make_ctx("bull", "not_held", "steady_up", "high", asset_class="hot",
                             earnings=hot_5), "bull.not_held.steady_up.high", [W, B], {B: {EARN, THIN}},
              warns=[warn("earnings_imminent", earn_days=5, limit=7)]),

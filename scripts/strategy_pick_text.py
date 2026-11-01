@@ -20,6 +20,8 @@ STRATEGY_LABELS = {
     "no_options": "不做期权",
     "wait_earnings": "等财报后再看",
     "reduce_position": "考虑减仓",
+    "bear_put_spread": "Bear Put 价差",
+    "bear_call_spread": "Bear Call 价差",
     "long_call": "买入 Call",
     "naked_call": "裸卖 Call",
     "bearish": "看跌策略",
@@ -51,6 +53,8 @@ STRATEGY_PAGES = {
     "no_options": "cash-secured-put.md",
     "wait_earnings": "cash-secured-put.md",
     "reduce_position": "protective-put-collar.md",
+    "bear_put_spread": "bear-put-debit-spread.md",
+    "bear_call_spread": "bear-call-credit-spread.md",
     "long_call": "long-call-long-put.md",
     "naked_call": "naked-call.md",
     "bearish": "long-call-long-put.md",
@@ -70,6 +74,8 @@ NEXT_COMMANDS = {
     "no_options": "/stock-review {ticker}",
     "reduce_position": "/stock-review {ticker}",
     "wait_earnings": "/strategy-pick {ticker}",
+    "bear_put_spread": "/bearput-sim suggest {ticker}",
+    "bear_call_spread": "/bearcall-sim suggest {ticker}",
 }
 
 NEXT_COMMAND_CAVEATS = {
@@ -81,11 +87,14 @@ NEXT_COMMAND_CAVEATS = {
     "protective_put": "扫全部持股，按 90% / 85% / 80% 现价选 Put，具体档由它定",
     "reduce_position": "减仓走 /stock-review、/stock-exit，本工具不下单",
     "wait_earnings": "财报落地后重跑本命令",
+    "bear_put_spread": "买方：付的净支出就是最大亏损，到期价格不跌到长腿之下会全亏",
+    "bear_call_spread": "卖方：上涨亏钱，最大亏损是宽度减权利金",
 }
 
+_BEAR = ("bear_put_spread", "bear_call_spread")
 _ALL_CHOOSABLE = ("cash_secured_put", "bull_put_spread", "bull_call_spread", "iron_condor",
                   "covered_call", "collar", "protective_put", "hold", "no_options",
-                  "wait_earnings", "reduce_position")
+                  "wait_earnings", "reduce_position") + _BEAR
 _SELL_PUTS = ("cash_secured_put", "bull_put_spread")
 _SHARE_BASED = ("covered_call", "collar", "protective_put")
 
@@ -141,7 +150,17 @@ _WHY_NOT_ROWS = (
     ("no_tool", ("long_call",),
      "买入 Call 页：横盘或慢涨被 Theta 每天抽水；仓库也没有它的模拟工具"),
     ("never_naked", ("naked_call",), "裸卖 Call 页：最大亏损无限，工具永不推荐"),
-    ("never_bearish", ("bearish",), "看跌策略：工具不做（用户偏好看涨与中性）"),
+    ("never_bearish", ("bearish",), "买入 Put 单腿：不单独推荐，需要时手动用 /longput-sim"),
+    ("view_not_bearish", ("bear_put_spread",),
+     "看法不是不看好：看跌价差只在不看好时推荐（Bear Put 页'适用'：温和看跌、有明确目标价）"),
+    ("view_not_bearish", ("bear_call_spread",),
+     "看法不是不看好：看跌价差只在不看好时推荐（Bear Call 页'适用'：看跌到横盘，不是暴跌）"),
+    ("held_use_shares", ("bear_call_spread",),
+     "已有单账户 ≥ 100 股：持股时不卖看涨价差（现股多头和空头 Call 价差方向冲突），"
+     "本叶子先考虑减仓，再看 Bear Put 价差"),
+    ("earnings_imminent", ("bear_call_spread",),
+     "热门股财报在 7 天内：第一推荐改为'等财报后再看'，Bear Call 让位（Bear Call 页'不适用'："
+     "财报等事件窗口，跳空可以一步穿过两条腿）"),
     ("wheel_is_flow", ("wheel",), "Wheel 是现金担保 Put 被指派后的流程，不单列"),
 )
 
@@ -169,8 +188,12 @@ WARN = {
     "class_conflict": "wiki 档位（{wiki}）与持仓类型列（{stock_type}）不一致，按 wiki",
     "class_unknown": "类别未知，按热门股处理；可用 --class 指定",
     "bull_down": "论点看好但走势向下",
-    "bear_held": "考虑减仓（/stock-review、/stock-exit）或用 Collar 锁一个下限（/collar-screen）",
-    "bear_not_held": "看法不看好：不做期权",
+    "bear_held": ("考虑减仓（/stock-review、/stock-exit），或 Bear Put 价差（/bearput-sim），"
+                  "或用 Collar 锁一个下限（/collar-screen）"),
+    "bear_not_held": "看法不看好：只推荐有限风险的看跌价差，买方 Bear Put 优先于卖方 Bear Call",
+    "bear_against_trend": "看法不看好，但近一年走势是稳步上涨，看跌价差是逆势单",
+    "bear_put_iv_high": "IV 偏高，买方付的权利金偏贵（Bear Put 价差）",
+    "bear_drift": "历史上市场整体向上漂移，看跌策略样本里亏的概率偏高",
     "no_lot": "持股不足一张合约（最大单账户 {max_lot:g} 股 < {lot:g}），备兑 Call / Collar 做不了，"
               "按未持有选策略",
     "reduce_hint": "持有不足 {lot:g} 股且看法不是看好：考虑减仓（/stock-review、/stock-exit）",

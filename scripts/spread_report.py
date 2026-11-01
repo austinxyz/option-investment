@@ -7,22 +7,28 @@ from __future__ import annotations
 
 import option_settings
 import spread_core as core
-from spread_ledger import (BREACHED_SIDE_LABELS, BULLCALL_LABEL, BULLCALL_STRIKE_KEYS,
-                           CONDOR_STRIKE_KEYS, STRATEGY_BULL_CALL, STRATEGY_BULL_PUT,
-                           STRATEGY_COLLAR, STRATEGY_COVERED_CALL, STRATEGY_IRON_CONDOR,
-                           STRATEGY_PROTECTIVE_PUT, strategy_of)
+from spread_ledger import (BEARCALL_LABEL, BEARPUT_LABEL, BEARPUT_STRIKE_KEYS,
+                           BREACHED_SIDE_LABELS, BULLCALL_LABEL, BULLCALL_STRIKE_KEYS,
+                           CONDOR_STRIKE_KEYS, LONGPUT_LABEL, RR_LABEL, RR_STRIKE_KEYS,
+                           STRATEGY_BEAR_CALL, STRATEGY_BEAR_PUT, STRATEGY_BULL_CALL,
+                           STRATEGY_BULL_PUT, STRATEGY_COLLAR, STRATEGY_COVERED_CALL,
+                           STRATEGY_IRON_CONDOR, STRATEGY_LONG_PUT, STRATEGY_PROTECTIVE_PUT,
+                           STRATEGY_RR, strategy_of)
 
 STRATEGY_CSP = "cash_secured_put"
 # Put-protected share positions: their own block, never in any win-rate denominator.
 LOT_PUT_STRATEGIES = (STRATEGY_COLLAR, STRATEGY_PROTECTIVE_PUT)
+# The three bearish strategies: each has its own section and comparison row.
+BEARISH_STRATEGIES = (STRATEGY_BEAR_CALL, STRATEGY_BEAR_PUT, STRATEGY_LONG_PUT)
 # Only these have a win rate; a strategy not listed here is excluded from every statistic.
 WIN_RATE_STRATEGIES = (STRATEGY_BULL_PUT, STRATEGY_CSP, STRATEGY_COVERED_CALL, STRATEGY_IRON_CONDOR,
-                       STRATEGY_BULL_CALL)
-# compute_stats never mixes a condor or a bull call into these: each has its own block and row.
+                       STRATEGY_BULL_CALL, STRATEGY_RR, *BEARISH_STRATEGIES)
+# compute_stats never mixes a condor, bull call, risk reversal or bearish strategy into these:
+# each has its own block and row.
 SINGLE_SPREAD_STATS = (STRATEGY_BULL_PUT, STRATEGY_CSP, STRATEGY_COVERED_CALL)
 # Strategies rendered by _other_strategy_sections; an unknown strategy is rendered nowhere.
 OTHER_SECTION_STRATEGIES = (STRATEGY_CSP, STRATEGY_COVERED_CALL, STRATEGY_IRON_CONDOR,
-                            STRATEGY_BULL_CALL)
+                            STRATEGY_BULL_CALL, STRATEGY_RR, *BEARISH_STRATEGIES)
 # Strategies the capital and summary maths understand; anything else counts as zero.
 KNOWN_STRATEGIES = WIN_RATE_STRATEGIES + LOT_PUT_STRATEGIES
 # Public page allowlist: only strategies that are paper-only. Anything else, including a
@@ -55,8 +61,17 @@ def capital_at_risk(s: dict) -> float:
     mult = 100 * s["contracts"]
     if strategy_of(s) not in KNOWN_STRATEGIES:
         return 0.0  # never guess at fields of a strategy this code does not know
+    if strategy_of(s) == STRATEGY_BEAR_CALL:
+        return round((s["width"] - s["credit"]) * mult, 2) + 0.0  # seller max loss
+    if strategy_of(s) == STRATEGY_BEAR_PUT:
+        return core.bearput_max_loss(s["debit"], s["contracts"])  # the debit paid
+    if strategy_of(s) == STRATEGY_LONG_PUT:
+        return core.longput_max_loss(s["debit"], s["contracts"])  # the premium paid
     if strategy_of(s) == STRATEGY_BULL_CALL:
         return core.bullcall_max_loss(s["debit"], s["contracts"])  # the debit paid is all it can lose
+    if strategy_of(s) == STRATEGY_RR:
+        # conservative cash-secured basis: the downside runs to zero, the broker margin differs
+        return core.rr_capital(s["short_put_strike"], s["net_credit"], s["contracts"])
     if strategy_of(s) == STRATEGY_IRON_CONDOR:
         return (s["width"] - s["net_credit"]) * mult  # only one side can lose at expiry
     if strategy_of(s) in LOT_PUT_STRATEGIES:
@@ -75,7 +90,8 @@ def pnl_base(s: dict) -> float:
         return s.get("cost_basis", 0.0) * 100 * s["contracts"]
     if strategy_of(s) in LOT_PUT_STRATEGIES:
         return s.get("cost_basis", 0.0) * s.get("covered_shares", 0)
-    if strategy_of(s) in (STRATEGY_BULL_PUT, STRATEGY_CSP, STRATEGY_IRON_CONDOR, STRATEGY_BULL_CALL):
+    if strategy_of(s) in (STRATEGY_BULL_PUT, STRATEGY_CSP, STRATEGY_IRON_CONDOR, STRATEGY_BULL_CALL,
+                          STRATEGY_RR, *BEARISH_STRATEGIES):
         return capital_at_risk(s)
     return 0.0  # an unknown strategy has no base
 
@@ -151,9 +167,19 @@ def result_text(s: dict) -> str:
 def legs_label(s: dict) -> str:
     """'150/145' for a spread, '150 Put' for a single-leg record, both legs for a collar,
     '85/90/110/115' (long put / short put / short call / long call) for an iron condor,
-    '100/105 Call' (long / short) for a bull call debit spread."""
+    '100/105 Call' (long / short) for a bull call debit spread, '90 Put 卖 / 110 Call 买' for a
+    risk reversal, '105/110 Call' (short / long) for a bear call, '100/90 Put' (long / short) for
+    a bear put and '95 Put' for a long put."""
+    if strategy_of(s) == STRATEGY_BEAR_CALL:
+        return f"{s['short_strike']:g}/{s['long_strike']:g} Call"
+    if strategy_of(s) == STRATEGY_BEAR_PUT:
+        return "/".join(f"{s[k]:g}" for k in BEARPUT_STRIKE_KEYS) + " Put"
+    if strategy_of(s) == STRATEGY_LONG_PUT:
+        return f"{s['put_strike']:g} Put"
     if strategy_of(s) in LOT_PUT_STRATEGIES:
         return lot_put_legs(s)
+    if strategy_of(s) == STRATEGY_RR:
+        return rr_legs_text(s)
     if strategy_of(s) == STRATEGY_BULL_CALL:
         return "/".join(f"{s[k]:g}" for k in BULLCALL_STRIKE_KEYS) + " Call"
     if strategy_of(s) == STRATEGY_IRON_CONDOR:
@@ -179,6 +205,43 @@ BULLCALL_THRESHOLD_LABELS = (
     f"🔴 已到止损线（浮亏≥净支出的{core.BULLCALL_STOP_FRACTION * 100:.0f}%）",
     f"🟢 已到止盈线（最大收益的{core.BULLCALL_TAKE_PROFIT_FRACTION * 100:.0f}%）",
 )
+
+
+# (stop, take-profit) tip text for the three bearish strategies' status lines. Bear call is a
+# seller and reuses the bull put spread's basis; the two buyers use their own constants.
+BEARCALL_THRESHOLD_LABELS = threshold_labels(False)
+BEARPUT_THRESHOLD_LABELS = (
+    f"🔴 已到止损线（浮亏≥净支出的{core.BEARPUT_STOP_FRACTION * 100:.0f}%）",
+    f"🟢 已到止盈线（最大收益的{core.BEARPUT_TAKE_PROFIT_FRACTION * 100:.0f}%）",
+)
+LONGPUT_THRESHOLD_LABELS = (
+    f"🔴 已到止损线（浮亏≥净支出的{core.LONGPUT_STOP_FRACTION * 100:.0f}%）",
+    f"🟢 已到止盈线（浮盈≥净支出的{core.LONGPUT_TAKE_PROFIT_FRACTION * 100:.0f}%）",
+)
+# Distance labels on the status line (sign conventions pinned in tests/test_spread_sim_bearish.py).
+BEARCALL_DIST_LABEL = "距短腿"
+BEARPUT_DIST_LABEL = "距长腿"
+LONGPUT_DIST_LABEL = "距行权价"
+# Error text when a needed leg has no valid quote (status shows it, close refuses on it).
+NO_QUOTE_TWO_LEGS = "取不到报价：期权链里找不到这两腿的有效报价"
+NO_QUOTE_ONE_LEG = "取不到报价：期权链里找不到这条腿的有效报价"
+
+
+# (stop, take-profit) tip text for a risk reversal; the only definition, shared by the status
+# line and (later) md / html. Basis: multiples of the short put premium collected.
+RR_THRESHOLD_LABELS = (
+    f"🔴 已到止损线（浮亏≥短 Put 权利金的{core.RR_STOP_LOSS_MULTIPLE:g}倍）",
+    f"🟢 已到止盈线（浮盈≥短 Put 权利金的{core.RR_TAKE_PROFIT_MULTIPLE:g}倍）",
+)
+# Where a settled risk reversal landed, and what the down zone means for a real account.
+RR_ZONE_LABELS = {"up": "上方，Call 价内", "dead": "死区，两腿作废", "down": "下方，Put 价内"}
+RR_ASSIGNMENT_HINT = "Put 价内，真实情况下会按行权价接股；本工具不模拟股票腿"
+
+
+def rr_legs_text(s: dict) -> str:
+    """'90 Put 卖 / 110 Call 买' (short put first, then long call)."""
+    put_k, call_k = (s[k] for k in RR_STRIKE_KEYS)
+    return f"{put_k:g} Put 卖 / {call_k:g} Call 买"
 
 
 def _mark_cells(m: dict | None, csp: bool = False,
@@ -219,8 +282,14 @@ def _open_summary(records: list[dict], marks: dict) -> list[str]:
     condor_cap = sum(capital_at_risk(s) for s in open_ if strategy_of(s) == STRATEGY_IRON_CONDOR)
     spread_cap = sum(capital_at_risk(s) for s in open_ if strategy_of(s) == STRATEGY_BULL_PUT)
     bullcall_cap = sum(capital_at_risk(s) for s in open_ if strategy_of(s) == STRATEGY_BULL_CALL)
-    labels = ("Put 贷方价差", "现金担保 Put", "保护性 Put / Collar 净支出", "铁鹰", BULLCALL_LABEL)
-    amounts = (spread_cap, csp_cap, lot_cap, condor_cap, bullcall_cap)
+    rr_cap = sum(capital_at_risk(s) for s in open_ if strategy_of(s) == STRATEGY_RR)
+    bearcall_cap = sum(capital_at_risk(s) for s in open_ if strategy_of(s) == STRATEGY_BEAR_CALL)
+    bearput_cap = sum(capital_at_risk(s) for s in open_ if strategy_of(s) == STRATEGY_BEAR_PUT)
+    longput_cap = sum(capital_at_risk(s) for s in open_ if strategy_of(s) == STRATEGY_LONG_PUT)
+    labels = ("Put 贷方价差", "现金担保 Put", "保护性 Put / Collar 净支出", "铁鹰", BULLCALL_LABEL,
+              f"{RR_LABEL}（现金担保口径）", BEARCALL_LABEL, BEARPUT_LABEL, LONGPUT_LABEL)
+    amounts = (spread_cap, csp_cap, lot_cap, condor_cap, bullcall_cap, rr_cap,
+               bearcall_cap, bearput_cap, longput_cap)
     parts = [f"{label} {_usd(amount)}" for label, amount in zip(labels, amounts) if amount]
     split = f"（{' / '.join(parts)}）" if len(parts) > 1 else ""
     # Collar / protective-put pnl has a different base (cost x shares): shown in its own section.
@@ -324,6 +393,13 @@ def _bucket_section(st: dict) -> list[str]:
     return lines + [""]
 
 
+def gap_lines(st: dict) -> list[str]:
+    """The opening-price assumption paragraph (Bull Put spreads' average next-open gap)."""
+    gap = "—" if st["avg_abs_gap"] is None else f"{st['avg_abs_gap']:.2f}%"
+    return [f"下一个交易日开盘相对快照价的平均绝对跳空：{gap}。真实世界无法在快照价成交，"
+            "这个数字越大，模拟结果越乐观。", ""]
+
+
 def compute_strategy_stats(records: list[dict]) -> dict[str, dict]:
     """compute_stats per strategy, for the strategies present in `records`."""
     groups: dict[str, list[dict]] = {}
@@ -348,6 +424,8 @@ def _strategy_section(records: list[dict]) -> list[str]:
     lines.append("")
     lines += condor_theory_note(records)
     lines += _bullcall_module().bullcall_required_note(records)
+    lines += _rr_module().rr_compare_note(records)
+    lines += _bearish_module().compare_notes(records)
     for name, st in stats.items():
         if not st["enough_sample"]:
             lines += [f"> ⚠️ {name} 样本不足（{st['n_settled']} < {MIN_SAMPLE}），别下结论。", ""]
@@ -563,6 +641,10 @@ def _other_strategy_sections(others: list[dict], records: list[dict], marks: dic
     bullcalls = [s for s in others if strategy_of(s) == STRATEGY_BULL_CALL]
     if bullcalls:
         out += _bullcall_module().bullcall_section(bullcalls, marks)
+    rrs = [s for s in others if strategy_of(s) == STRATEGY_RR]
+    if rrs:
+        out += _rr_module().rr_section(rrs, marks)
+    out += _bearish_module().sections(others, marks)
     return out
 
 
@@ -571,6 +653,18 @@ def _bullcall_module():
     # import would be circular.
     import spread_report_bullcall
     return spread_report_bullcall
+
+
+def _rr_module():
+    # Same circularity as _bullcall_module.
+    import spread_report_rr
+    return spread_report_rr
+
+
+def _bearish_module():
+    # Same circularity as _bullcall_module.
+    import spread_report_bearish
+    return spread_report_bearish
 
 
 CONDOR_FOOTER = "铁鹰=最大亏损（单侧宽度−净权利金）×100×张数（到期最多只有一侧亏）；"
@@ -676,7 +770,6 @@ def render_report(records: list[dict], marks: dict | None, generated_on: str,
     others = [s for s in records if strategy_of(s) in OTHER_SECTION_STRATEGIES]
     st = compute_stats(spreads)
     open_ = [s for s in spreads if s["status"] == "open"]
-    gap = "—" if st["avg_abs_gap"] is None else f"{st['avg_abs_gap']:.2f}%"
     out = [
         "# 垂直 Put 贷方价差与现金担保 Put 纸上交易报告", "",
         f"*由 `/spread-sim` 自动生成于 {generated_on}，只读。纸上交易，不含真实持仓。*", "",
@@ -685,8 +778,7 @@ def render_report(records: list[dict], marks: dict | None, generated_on: str,
         "## 已结算", "", *_settled_section(spreads),
         "## 累积统计", "", *_stats_section(st),
         "## 分档对比", "", *_bucket_section(st),
-        "## 开仓价假设的偏差", "",
-        f"下一个交易日开盘相对快照价的平均绝对跳空：{gap}。真实世界无法在快照价成交，这个数字越大，模拟结果越乐观。", "",
+        "## 开仓价假设的偏差", "", *gap_lines(st),
     ]
     if others:
         out += _other_strategy_sections(others, records, marks, broker_cols)
@@ -700,6 +792,9 @@ def render_report(records: list[dict], marks: dict | None, generated_on: str,
                    else "")
     if any(strategy_of(s) == STRATEGY_BULL_CALL for s in others):
         condor_note += _bullcall_module().BULLCALL_FOOTER
+    if any(strategy_of(s) == STRATEGY_RR for s in others):
+        condor_note += _rr_module().RR_FOOTER
+    condor_note += _bearish_module().footers(others)
     out += ["---", "*口径：每张合约 ×100 的美元；中间价成交；不含手续费。"
             "占用资金：Put 贷方价差=最大亏损（宽度−权利金）×100×张数，"
             "现金担保 Put=行权价×100×张数（需备足的现金）；"
@@ -746,29 +841,6 @@ def format_suggestions(ticker: str, snapshot_date: str, spot: float, expiry: str
     return "\n".join(lines)
 
 
-PUBLIC_TITLE = "# 模拟盘报告（垂直 Put 贷方价差与现金担保 Put 纸上交易）"
-
-
-def _label_contracts(lines: list[str]) -> list[str]:
-    """Write the 张数 column as "N 张" so a contract count never reads as a share count."""
-    out: list[str] = []
-    col: int | None = None
-    for line in lines:
-        if not line.startswith("|"):
-            col = None
-            out.append(line)
-            continue
-        cells = line.split("|")
-        names = [c.strip() for c in cells]
-        if "张数" in names:
-            col = names.index("张数")
-        elif col is not None and col < len(cells) and names[col].isdigit():
-            cells[col] = f" {names[col]} 张 "
-            line = "|".join(cells)
-        out.append(line)
-    return out
-
-
 def public_records(records: list[dict]) -> list[dict]:
     """Only the paper-only strategies; everything else is withheld from the public page."""
     return [s for s in records if strategy_of(s) in PUBLIC_STRATEGIES]
@@ -777,14 +849,9 @@ def public_records(records: list[dict]) -> list[dict]:
 def render_public_report(records: list[dict], marks: dict | None, generated_on: str) -> str:
     """Shareable markdown for the public KB (wiki/options/paper-trading.md).
 
-    An allowlist, not a blacklist: covered calls, collars and protective puts are
-    written against held lots (real share counts and cost), which must never reach the
-    public tree, and a strategy added later must opt in. Front matter matches the
-    other wiki pages.
+    Built by paper_book_public from the paper-book layers (overview, per strategy, per
+    trade), restricted to PUBLIC_STRATEGIES. Imported on use: paper_book_public builds on
+    this module, so a top-level import would be circular.
     """
-    shareable = public_records(records)
-    body = _label_contracts(render_report(shareable, marks, generated_on, broker_cols=False).split("\n"))
-    body[0] = PUBLIC_TITLE
-    body[2] = (f"*数据快照 {generated_on}，非实时。纸上交易，不含真实持仓；"
-               "涉及真实持股的策略（备兑 Call、保护性 Put、Collar）不在此公开。不构成投资建议。*")
-    return f"---\nsource: {option_settings.public_source_label()}\n---\n\n" + "\n".join(body)
+    import paper_book_public
+    return paper_book_public.render_public_page(records, marks, generated_on)

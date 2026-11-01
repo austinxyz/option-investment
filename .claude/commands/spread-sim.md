@@ -4,7 +4,7 @@
 
 Paper-trade Bull Put Credit Spreads. On any trading day (or the weekend) the user names a ticker; this command proposes three candidates (delta ≈ 0.10 / 0.15 / 0.20) expiring about 7 days after the snapshot day (the first listed expiry at least 7 days out; the file says when it is not exactly 7); the user picks one; the trade is recorded in a private ledger; during the week the user checks mark-to-market and may close early, otherwise it settles at the expiry-day close and the P&L is logged. 2–3 trades per week, accumulated, to test whether the real win rate beats the break-even win rate (75%–86%).
 
-**Paper trading only.** Never touches `data/positions.md`, never places an order, never writes anything under `outputs/`. Ledger and report live in `data/paper-trading/` (gitignored). The one exception under `wiki/`: every `status` run (and any open/close once nothing is left open without marks) also refreshes `wiki/options/paper-trading.md`, a shareable markdown copy of the report with front matter. It withholds every strategy tied to real shares (covered calls, protective puts, collars) via an allowlist, and carries no positions, shares or cost.
+**Paper trading only.** Never touches `data/positions.md`, never places an order, never writes anything under `outputs/`. Ledger and report live in `data/paper-trading/` (gitignored). The one exception under `wiki/`: every `status` run (and any open/close once nothing is left open without marks) also refreshes `wiki/options/paper-trading.md`, a shareable page with front matter, built from the same three layers as `/paper-book`'s `book.md` (overview, per strategy, per trade) plus the Delta-bucket and opening-gap sections. It withholds every strategy tied to real shares (covered calls, protective puts, collars) via an allowlist, and carries no positions, shares or cost.
 
 ## Arguments
 
@@ -14,6 +14,7 @@ Natural language or explicit. Parse into one of four actions:
 |--------|---------------|-------------|
 | suggest | "选票 ZZZQ ZZQB"（任意交易日都行） | `suggest TICKER [--width W]` — once per ticker; omit `--width` to get the recommended one |
 | open | "ZZZQ 选 0.15 档" / "ZZQB 0.10，2 张" | `open TICKER {0.10,0.15,0.20} [--contracts N] [--width W]` |
+| open（按推荐） | "按 /strategy-pick 的推荐开 ZZZQ" | `open TICKER --from-pick [--contracts N] [--width W]` — 档位改为读今天 `/strategy-pick TICKER` 的 Bull Put 价差推荐（Delta 目标就近放进档位，与报告里 `open` 那行同一规则），控制台先打印 `按 /strategy-pick <日期> 的结果：Delta 目标 … → 档位 …`；档位与 `--from-pick` 二选一。只读**今天**的 `data/strategy-picks/<今天>-<TICKER>.json`（demo 数据源读其下 `demo/`）：今天没跑过、文件是旧的、格式不对、推荐里没有 Bull Put 价差，都直接拒绝（退出码 2，什么都不写），不会回落到更早的结果；先重跑 `/strategy-pick TICKER`。其余校验（已保存候选、宽度核对）不变 |
 | status | "看一下模拟盘" / "周中检查" | `status` |
 | close | "提前平仓 #2" | `close ID` |
 

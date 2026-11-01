@@ -367,19 +367,36 @@ def _assert_no_handoff(monkeypatch, doc):
 @pytest.mark.parametrize("argv,over,leaf", [
     (("ZZZQ",), "gate", "gate_fail"),
     (("ZZZQ",), "short", "history_short"),
-    (("ZZZQ", "--view", "不看好"), None, "bear.not_held"),
-    (("ZZZQ", "--view", "不看好", "--class", "hot"), "earnings", "bear.not_held"),
 ])
-def test_no_handoff_section_for_gate_fail_history_short_bear_not_held(monkeypatch, tmp_path,
-                                                                     argv, over, leaf):
-    from datetime import date
+def test_no_handoff_section_for_gate_fail_history_short(monkeypatch, tmp_path, argv, over, leaf):
     from strategy_pick_cli_stubs import history
     kw = {"gate": dict(load_history=history(volume=130_000.0)),
-          "short": dict(load_history=history(150)),
-          "earnings": dict(next_earnings=date(2026, 10, 28)), None: {}}[over]
+          "short": dict(load_history=history(150))}[over]
     doc, md = base_result(monkeypatch, tmp_path, argv=argv, **kw)
     assert doc["leaf_id"] == leaf and HANDOFF_TITLE not in md
     _assert_no_handoff(monkeypatch, doc)
+
+
+@pytest.mark.parametrize("over,strategies", [
+    (None, ["bear_put_spread", "bear_call_spread"]),
+    ("earnings", ["wait_earnings", "bear_put_spread"]),  # hot, earnings in 5 days
+])
+def test_bear_not_held_has_handoff_section(monkeypatch, tmp_path, over, strategies):
+    from datetime import date
+    argv = ("ZZZQ", "--view", "不看好") + (("--class", "hot") if over else ())
+    kw = dict(next_earnings=date(2026, 10, 28)) if over else {}
+    doc, md = base_result(monkeypatch, tmp_path, argv=argv, **kw)
+    assert doc["leaf_id"] == "bear.not_held"
+    assert [p["strategy"] for p in doc["picks"]] == strategies
+    assert md.count(HANDOFF_TITLE) == 1
+    section = md.split(HANDOFF_TITLE, 1)[1].split("\n\n")[1].split("\n")
+    expected = {"bear_put_spread": "- Bear Put 价差（长 Put 0.50–0.60）：先 `/bearput-sim suggest "
+                                   "ZZZQ`，再 `open ZZZQ 0.60`（或更便宜的 `open ZZZQ 0.50`）",
+                "bear_call_spread": "- Bear Call 价差（短 Call 0.10–0.15）：先 `/bearcall-sim "
+                                    "suggest ZZZQ`，再 `open ZZZQ 0.15`（或更价外的 `open ZZZQ 0.10`）"}
+    assert section == [expected[s] for s in strategies if s in expected]
+    console = render.render_console(doc, render.Path("a.md"), render.Path("a.json"))
+    assert console.count(HANDOFF_PREFIX) == len(section)
 
 
 @pytest.mark.parametrize("only", ["hold", "wait_earnings", "no_options", "reduce_position"])
@@ -455,3 +472,48 @@ def test_handoff_does_not_import_render():
     names |= {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
     assert "strategy_pick_render" not in names
     assert "strategy_pick_handoff" in inspect.getsource(render)
+
+
+# --- bear spreads: hand-off in the report and console (2026-10-30 bearish design, 3) ---------------
+BEAR_PUT_LINE = ("- Bear Put 价差（长 Put 0.50–0.60）：先 `/bearput-sim suggest ZZZQ`，"
+                 "再 `open ZZZQ 0.60`（或更便宜的 `open ZZZQ 0.50`）")
+BEAR_CALL_LINE = ("- Bear Call 价差（短 Call 0.10–0.15）：先 `/bearcall-sim suggest ZZZQ`，"
+                  "再 `open ZZZQ 0.15`（或更价外的 `open ZZZQ 0.10`）")
+BEAR_ARGV = ("ZZZQ", "--view", "不看好")
+
+
+def _handoff_lines(md: str) -> list[str]:
+    return md.split(HANDOFF_TITLE, 1)[1].split("\n\n")[1].split("\n")
+
+
+def test_bear_not_held_report_has_both_bucket_lines(monkeypatch, tmp_path):
+    doc, md = base_result(monkeypatch, tmp_path, argv=BEAR_ARGV)
+    assert md.count(HANDOFF_TITLE) == 1
+    assert _handoff_lines(md) == [BEAR_PUT_LINE, BEAR_CALL_LINE]
+    console = render.render_console(doc, tmp_path / "a.md", tmp_path / "a.json").split("\n")
+    shown = [s[len(HANDOFF_PREFIX):] for s in console if s.startswith(HANDOFF_PREFIX)]
+    assert shown == [BEAR_PUT_LINE.split("）：", 1)[1], BEAR_CALL_LINE.split("）：", 1)[1]]
+    assert [console[i - 1][:5] for i, s in enumerate(console) if s.startswith(HANDOFF_PREFIX)] \
+        == ["  1. ", "  2. "]
+
+
+def test_bear_held_report_handoff_only_for_bear_put(monkeypatch, tmp_path):
+    doc, md = base_result(monkeypatch, tmp_path, argv=BEAR_ARGV, read_holding=_held())
+    assert doc["leaf_id"] == "bear.held"
+    assert [p["strategy"] for p in doc["picks"]] == ["reduce_position", "bear_put_spread"]
+    assert _handoff_lines(md) == [BEAR_PUT_LINE]
+    assert "/bearcall-sim suggest" not in md.split("## 七步逐步表", 1)[0].split(HANDOFF_TITLE, 1)[1]
+    console = render.render_console(doc, tmp_path / "a.md", tmp_path / "a.json").split("\n")
+    at = [i for i, s in enumerate(console) if s.startswith(HANDOFF_PREFIX)]
+    assert len(at) == 1 and console[at[0] - 1].startswith("  2. Bear Put")
+
+
+def test_bear_missing_iv_still_hands_off_the_buckets(monkeypatch, tmp_path):
+    from strategy_pick_cli_stubs import snapshot
+    doc, md = base_result(monkeypatch, tmp_path, argv=BEAR_ARGV,
+                          option_snapshot=snapshot(atm_iv=None))
+    assert doc["iv"]["method"] == "rv_vs_rv"
+    assert [p["strategy"] for p in doc["picks"]] == ["bear_put_spread", "bear_call_spread"]
+    # Bucket text does not depend on IV; with no sigma the reference level is simply absent.
+    assert _handoff_lines(md) == [BEAR_PUT_LINE, BEAR_CALL_LINE]
+    assert all(p["reference_level"] is None for p in doc["picks"])

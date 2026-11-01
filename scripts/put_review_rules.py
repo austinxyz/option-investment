@@ -7,7 +7,11 @@ await_settlement. See docs/superpowers/specs/2026-10-18-put-review-design.md.
 from __future__ import annotations
 
 # spread_core is pure arithmetic (no I/O, no clock), so importing its constant keeps this pure.
-from spread_core import BULLCALL_STOP_FRACTION, BULLCALL_TIME_STOP_DAYS
+from spread_core import (BEARPUT_STOP_FRACTION, BEARPUT_TAKE_PROFIT_FRACTION,
+                         BEARPUT_TIME_STOP_DAYS, BULLCALL_STOP_FRACTION, BULLCALL_TIME_STOP_DAYS,
+                         LONGPUT_STOP_FRACTION, LONGPUT_TAKE_PROFIT_FRACTION,
+                         LONGPUT_TIME_STOP_DAYS, RR_STOP_LOSS_MULTIPLE, RR_TAKE_PROFIT_MULTIPLE,
+                         STOP_FRACTION)
 
 CLOSE_CAPTURED = 0.80
 ATTENTION_DELTA = 0.35
@@ -21,6 +25,11 @@ PROTECTION_ENDS_DAYS = 7
 # Literal rather than imported so this module stays dependency-free (pure rules).
 STRATEGY_IRON_CONDOR = "iron_condor"
 STRATEGY_BULL_CALL = "bull_call_spread"
+STRATEGY_RR = "risk_reversal"
+STRATEGY_BEAR_CALL = "bear_call_spread"
+STRATEGY_BEAR_PUT = "bear_put_spread"
+STRATEGY_LONG_PUT = "long_put"
+RR_ASSIGNMENT_REASON = "可能被指派（按 Put 行权价接股）；由你决定接受还是买回"
 
 EPS = 1e-9  # float tolerance so a displayed "80%" really hits the 80% threshold
 UNKNOWN_EARNINGS_NOTE = "；财报日期未知"
@@ -194,8 +203,166 @@ def review_bullcall(m: dict, th: dict[str, float] | None = None) -> dict:
     return _verdict("hold", 5, "继续持有" + note + unknown)
 
 
+def _rr_attention(m: dict, t: dict[str, float]) -> str | None:
+    """Rule 4 reasons for a risk reversal (spec 5.9), or None. Delta is the short put's
+    |Delta| and only counts when the data is trusted."""
+    if m["earnings"] == "yes":
+        return "到期前有财报，需要关注"
+    delta = m.get("short_put_delta")
+    if m["data_ok"] and delta is not None and delta >= t["ATTENTION_DELTA"] - EPS:
+        return f"短 Put Delta {delta:.2f} 偏高，需要关注"
+    return None
+
+
+def review_rr(m: dict, th: dict[str, float] | None = None) -> dict:
+    """Risk reversal rules (spec 5.9), first match wins. The short put is the exposure, so the
+    in-the-money / stop check (rule 2) comes before take-profit; no quiet-Delta hold rule."""
+    t = {**thresholds(), **(th or {})}
+    if m["error"] is not None:
+        return _verdict("attention", 0, f"取不到报价：{m['error']}")
+    if m["days_left"] <= 0:
+        return _verdict("await_settlement", 1, "已到期，等待结算")
+    note = "" if m["data_ok"] else f"；{STALE_NOTE}"
+    unknown = UNKNOWN_EARNINGS_NOTE if m["earnings"] == "unknown" else ""
+    if m["spot"] < m["short_put_strike"]:
+        return _verdict("attention", 2, RR_ASSIGNMENT_REASON + note)
+    if m["stop_flag"]:
+        return _verdict("attention", 2, f"已触及止损线（浮亏≥短 Put 权利金的{RR_STOP_LOSS_MULTIPLE:g}倍）："
+                        + RR_ASSIGNMENT_REASON + note)
+    if m["take_profit_flag"]:
+        return _verdict("close", 3, f"浮盈已达短 Put 权利金的{RR_TAKE_PROFIT_MULTIPLE:g}倍，建议平仓"
+                        + note + unknown)
+    attention = _rr_attention(m, t)
+    if attention:
+        return _verdict("attention", 4, attention + note)
+    return _verdict("hold", 5, "继续持有" + note + unknown)
+
+
+def _bearcall_itm_reason(m: dict) -> str:
+    reason = (f"现价已涨过短腿 Call {m['short_strike']:g}（价内）："
+              "平仓止损，或承担价差最大亏损（宽度减权利金）")
+    if m.get("ex_div"):
+        reason += f"；除息日 {m['ex_div']} 前短腿已在价内，有提前指派风险"
+    return reason
+
+
+def _bearcall_quiet(m: dict, t: dict[str, float]) -> bool:
+    delta = m["delta"]
+    return (m["data_ok"] and delta is not None and m["days_left"] <= t["NEAR_EXPIRY_DAYS"]
+            and delta <= t["QUIET_DELTA"] + EPS)
+
+
+def review_bearcall(m: dict, th: dict[str, float] | None = None) -> dict:
+    """Bear call credit spread rules (parent spec 5.8): the seller order 0-5 with the direction
+    flipped. In the money is strict (spot > short strike); `delta` is the short call's |Delta|."""
+    t = {**thresholds(), **(th or {})}
+    if m["error"] is not None:
+        return _verdict("attention", 0, f"取不到报价：{m['error']}")
+    if m["days_left"] <= 0:
+        return _verdict("await_settlement", 1, "已到期，等待结算")
+    note = "" if m["data_ok"] else f"；{STALE_NOTE}"
+    unknown = UNKNOWN_EARNINGS_NOTE if m["earnings"] == "unknown" else ""
+    if m["spot"] > m["short_strike"]:
+        return _verdict("attention", 2, _bearcall_itm_reason(m) + note)
+    if m["stop_flag"]:
+        return _verdict("attention", 2, f"已触及止损线（浮亏≥最大亏损的 {STOP_FRACTION:.0%}）：平仓止损，"
+                        "或承担价差最大亏损（宽度减权利金）" + note)
+    captured = m["captured"]
+    if captured is not None and captured >= t["CLOSE_CAPTURED"] - EPS:
+        return _verdict("close", 3, f"已捕获 {captured:.0%} 权利金，建议平仓" + note + unknown)
+    if m["earnings"] == "yes":
+        return _verdict("attention", 4, "持仓期内有财报，需要关注" + note)
+    delta = m["delta"]
+    if m["data_ok"] and delta is not None and delta >= t["ATTENTION_DELTA"] - EPS:
+        return _verdict("attention", 4, f"短腿 Call Delta {delta:.2f} 偏高，需要关注")
+    if _bearcall_quiet(m, t):
+        return _verdict("hold", 5, "临近到期且短腿 Delta 很低，等它自然到期归零" + unknown)
+    return _verdict("hold", 5, "继续持有" + note + unknown)
+
+
+def _bearput_attention(m: dict, t: dict[str, float]) -> str | None:
+    """Rule 4 reasons for a bear put (parent spec 5.8), or None."""
+    long_k, short_k, days = m["long_put_strike"], m["short_put_strike"], m["days_left"]
+    if m["earnings"] == "yes":
+        return "到期前有财报：跳空向上照样满额亏损，需要关注"
+    if days <= BEARPUT_TIME_STOP_DAYS and m["pnl"] <= 0:
+        return f"只剩 {days} 天仍没有浮盈（时间止损），需要关注"
+    if days <= t["NEAR_EXPIRY_DAYS"] and short_k < m["spot"] < long_k:
+        return f"只剩 {days} 天且现价在两腿之间（{short_k:g}–{long_k:g}）：到期前主动处理"
+    return None
+
+
+def review_bearput(m: dict, th: dict[str, float] | None = None) -> dict:
+    """Bear put debit spread rules (parent spec 5.8), first match wins. Buyer side: no Delta
+    rule, and no ex-dividend exception (a long put is never assigned)."""
+    t = {**thresholds(), **(th or {})}
+    if m["error"] is not None:
+        return _verdict("attention", 0, f"取不到报价：{m['error']}")
+    if m["days_left"] <= 0:
+        return _verdict("await_settlement", 1, "已到期，等待结算")
+    note = "" if m["data_ok"] else f"；{STALE_NOTE}"
+    unknown = UNKNOWN_EARNINGS_NOTE if m["earnings"] == "unknown" else ""
+    short_k = m["short_put_strike"]
+    if m["stop_flag"]:
+        return _verdict("attention", 2, f"已触及止损线（浮亏≥净支出的 {BEARPUT_STOP_FRACTION:.0%}）：平仓止损，"
+                        "或承担最大亏损（全部净支出）" + note)
+    if m["take_profit_flag"]:
+        return _verdict("close", 3, f"浮盈已达最大收益的 {m['captured']:.0%}"
+                        f"（止盈线 {BEARPUT_TAKE_PROFIT_FRACTION:.0%}），建议平仓" + note + unknown)
+    if m["spot"] <= short_k:
+        return _verdict("close", 3, f"现价已跌到短腿 {short_k:g}：再跌也不多赚，建议平仓"
+                        + note + unknown)
+    attention = _bearput_attention(m, t)
+    if attention:
+        return _verdict("attention", 4, attention + note)
+    return _verdict("hold", 5, "继续持有" + note + unknown)
+
+
+def _longput_attention(m: dict, t: dict[str, float]) -> str | None:
+    """Rule 4 reasons for a long put (long-put spec section 2), or None."""
+    days = m["days_left"]
+    if m["earnings"] == "yes":
+        return "到期前有财报：IV 压缩与事件风险，需要关注"
+    if days <= LONGPUT_TIME_STOP_DAYS and m["pnl"] <= 0:
+        return f"只剩 {days} 天仍没有浮盈（时间止损），需要关注"
+    if days <= t["NEAR_EXPIRY_DAYS"] and m["spot"] >= m["put_strike"]:
+        return (f"只剩 {days} 天且现价仍在行权价 {m['put_strike']:g} 之上（价外）："
+                "到期前主动处理")
+    return None
+
+
+def review_longput(m: dict, th: dict[str, float] | None = None) -> dict:
+    """Long put rules (long-put spec section 2), first match wins. Buyer side: no Delta rule;
+    a long put is never assigned, so there is no ex-dividend rule either."""
+    t = {**thresholds(), **(th or {})}
+    if m["error"] is not None:
+        return _verdict("attention", 0, f"取不到报价：{m['error']}")
+    if m["days_left"] <= 0:
+        return _verdict("await_settlement", 1, "已到期，等待结算")
+    note = "" if m["data_ok"] else f"；{STALE_NOTE}"
+    unknown = UNKNOWN_EARNINGS_NOTE if m["earnings"] == "unknown" else ""
+    if m["stop_flag"]:
+        return _verdict("attention", 2, f"已触及止损线（浮亏≥净支出的 {LONGPUT_STOP_FRACTION:.0%}）：平仓止损，"
+                        "或承担最大亏损（全部权利金）" + note)
+    if m["take_profit_flag"]:
+        return _verdict("close", 3, f"浮盈已达净支出的 {LONGPUT_TAKE_PROFIT_FRACTION:.0%}，建议平仓"
+                        + note + unknown)
+    attention = _longput_attention(m, t)
+    if attention:
+        return _verdict("attention", 4, attention + note)
+    return _verdict("hold", 5, "继续持有" + note + unknown)
+
+
 def review_position(m: dict, th: dict[str, float] | None = None) -> dict:
     """First matching rule wins (spec 4.3). `th` overrides any of thresholds()."""
+    if m.get("strategy") == STRATEGY_BEAR_CALL:
+        return review_bearcall(m, th)
+    if m.get("strategy") == STRATEGY_BEAR_PUT:
+        return review_bearput(m, th)
+    if m.get("strategy") == STRATEGY_LONG_PUT:
+        return review_longput(m, th)
+    if m.get("strategy") == STRATEGY_RR:
+        return review_rr(m, th)
     if m.get("strategy") == STRATEGY_BULL_CALL:
         return review_bullcall(m, th)
     if m.get("strategy") == STRATEGY_IRON_CONDOR:

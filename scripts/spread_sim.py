@@ -3,6 +3,7 @@
 
     spread_sim.py suggest TICKER [--width 5]     # prints + saves suggestions/<date>-<TICKER>.{md,json}
     spread_sim.py open TICKER {0.10,0.15,0.20} [--contracts 1] [--width W]   # records the saved suggestion
+    spread_sim.py open TICKER --from-pick [...]   # bucket from today's /strategy-pick
     spread_sim.py status
     spread_sim.py close ID
 
@@ -27,6 +28,7 @@ import spread_explain
 import spread_html
 import spread_ledger as ledger_mod
 import spread_report
+import strategy_pick_frompick as frompick
 
 REPO = Path(__file__).resolve().parent.parent
 # The overlay (IBKR) ledger, fixed: broker orders never belong in the demo ledger.
@@ -248,9 +250,164 @@ def _mark_bullcall(s: dict) -> dict:
     }
 
 
+def _is_rr(s: dict) -> bool:
+    return ledger_mod.strategy_of(s) == ledger_mod.STRATEGY_RR
+
+
+def _rr_legs(s: dict) -> dict | None:
+    """Short put (put chain) and long call (call chain) quotes at explicit strikes, or None
+    when either leg lacks a valid one."""
+    put_k, call_k = (s[k] for k in ledger_mod.RR_STRIKE_KEYS)
+    puts = core.quote_map(spread_data.fetch_puts(s["ticker"], s["expiry"], strikes=(put_k,)))
+    calls = core.quote_map(spread_data.fetch_calls(s["ticker"], s["expiry"], strikes=(call_k,)))
+    legs = {"put": puts.get(put_k), "call": calls.get(call_k)}
+    return None if any(q is None for q in legs.values()) else legs
+
+
+def _mark_rr(s: dict) -> dict:
+    """Mid-price mark for an open risk reversal; the net cost to close is not clamped.
+
+    `dist_pct` is the distance above the put strike, `call_dist_pct` the distance below the
+    call strike (each negative once the price is past that strike)."""
+    legs = _rr_legs(s)
+    if legs is None:
+        return {"error": "期权链里找不到这两腿的有效报价"}
+    put_mid, call_mid = legs["put"]["mid"], legs["call"]["mid"]
+    exit_net = core.rr_exit_net(put_mid, call_mid)
+    pnl = core.rr_close_pnl(s["net_credit"], exit_net, s["contracts"])
+    underlying = spread_data.last_close(s["ticker"])[1]
+    if not core._usable(underlying):
+        return {"error": "现价无效，算不出距行权价"}
+    put_k, call_k = (s[k] for k in ledger_mod.RR_STRIKE_KEYS)
+    return {
+        "exit_net": exit_net, "value": call_mid - put_mid, "pnl": pnl, "underlying": underlying,
+        "dist_pct": (underlying - put_k) / underlying * 100,
+        "call_dist_pct": (call_k - underlying) / underlying * 100,
+        "flags": core.rr_threshold_flags(s["short_put_mid"], pnl, s["contracts"]),
+        "stale": any(q["stale"] for q in legs.values()),
+        "put_mid": put_mid, "call_mid": call_mid,
+        "put_iv": legs["put"]["iv"], "call_iv": legs["call"]["iv"],
+    }
+
+
+def _is_bearcall(s: dict) -> bool:
+    return ledger_mod.strategy_of(s) == ledger_mod.STRATEGY_BEAR_CALL
+
+
+def _is_bearput(s: dict) -> bool:
+    return ledger_mod.strategy_of(s) == ledger_mod.STRATEGY_BEAR_PUT
+
+
+def _is_longput(s: dict) -> bool:
+    return ledger_mod.strategy_of(s) == ledger_mod.STRATEGY_LONG_PUT
+
+
+def _bearcall_legs(s: dict) -> dict | None:
+    """Both call legs' quotes (explicit strikes=(short, long)), or None when either lacks one."""
+    short_k, long_k = s["short_strike"], s["long_strike"]
+    calls = core.quote_map(spread_data.fetch_calls(
+        s["ticker"], s["expiry"], strikes=(short_k, long_k)))
+    legs = {"short": calls.get(short_k), "long": calls.get(long_k)}
+    return None if any(q is None for q in legs.values()) else legs
+
+
+def _bearput_legs(s: dict) -> dict | None:
+    """Both put legs' quotes (explicit strikes=(long, short)), or None when either lacks one."""
+    long_k, short_k = (s[k] for k in ledger_mod.BEARPUT_STRIKE_KEYS)
+    puts = core.quote_map(spread_data.fetch_puts(
+        s["ticker"], s["expiry"], strikes=(long_k, short_k)))
+    legs = {"long": puts.get(long_k), "short": puts.get(short_k)}
+    return None if any(q is None for q in legs.values()) else legs
+
+
+def _longput_leg(s: dict) -> dict | None:
+    """The single put's quote (explicit strikes=(put_strike,)), or None without a valid one."""
+    puts = core.quote_map(spread_data.fetch_puts(
+        s["ticker"], s["expiry"], strikes=(s["put_strike"],)))
+    return puts.get(s["put_strike"])
+
+
+def _usable_underlying(s: dict) -> float | None:
+    underlying = spread_data.last_close(s["ticker"])[1]
+    return underlying if core._usable(underlying) else None
+
+
+def _mark_bearcall(s: dict) -> dict:
+    """Mid-price mark for an open bear call credit spread: cost clamped to [0, width].
+
+    `dist_pct` = (short strike - spot) / spot x 100: positive while the short call is out of
+    the money, negative once the price is above it. Seller thresholds (`threshold_flags`)."""
+    legs = _bearcall_legs(s)
+    if legs is None:
+        return {"error": spread_report.NO_QUOTE_TWO_LEGS}
+    cost = core.bearcall_close_cost(legs["short"]["mid"], legs["long"]["mid"], s["width"])
+    pnl, _ = core.bearcall_pnl(s["credit"], cost, s["contracts"])
+    underlying = _usable_underlying(s)
+    if underlying is None:
+        return {"error": "现价无效，算不出距短腿"}
+    return {
+        "cost": cost, "pnl": pnl, "underlying": underlying,
+        "dist_pct": (s["short_strike"] - underlying) / underlying * 100,
+        "flags": core.threshold_flags(s["credit"], s["width"], pnl, s["contracts"]),
+        "stale": any(q["stale"] for q in legs.values()),
+        "short_mid": legs["short"]["mid"], "long_mid": legs["long"]["mid"],
+    }
+
+
+def _mark_bearput(s: dict) -> dict:
+    """Mid-price mark for an open bear put debit spread: value clamped to [0, width].
+
+    `dist_pct` = (long put strike - spot) / spot x 100: positive once the long put is in the
+    money, negative while the price is still above it (mirrors the bull call's sign)."""
+    legs = _bearput_legs(s)
+    if legs is None:
+        return {"error": spread_report.NO_QUOTE_TWO_LEGS}
+    value = core.bearput_close_value(legs["long"]["mid"], legs["short"]["mid"], s["width"])
+    pnl, _ = core.bearput_pnl(s["debit"], value, s["contracts"])
+    underlying = _usable_underlying(s)
+    if underlying is None:
+        return {"error": "现价无效，算不出距长腿"}
+    return {
+        "value": value, "pnl": pnl, "underlying": underlying,
+        "dist_pct": (s["long_put_strike"] - underlying) / underlying * 100,
+        "flags": core.bearput_threshold_flags(s["debit"], s["width"], pnl, s["contracts"]),
+        "stale": any(q["stale"] for q in legs.values()),
+        "long_mid": legs["long"]["mid"], "short_mid": legs["short"]["mid"],
+        "long_iv": legs["long"]["iv"], "short_iv": legs["short"]["iv"],
+    }
+
+
+def _mark_longput(s: dict) -> dict:
+    """Mid-price mark for an open long put: value = the current mid (no clamp needed, >= 0).
+
+    `dist_pct` = (spot - put strike) / spot x 100: positive while the put is out of the money."""
+    leg = _longput_leg(s)
+    if leg is None:
+        return {"error": spread_report.NO_QUOTE_ONE_LEG}
+    value = leg["mid"]
+    pnl, _ = core.longput_pnl(s["debit"], value, s["contracts"])
+    underlying = _usable_underlying(s)
+    if underlying is None:
+        return {"error": "现价无效，算不出距行权价"}
+    return {
+        "value": value, "pnl": pnl, "underlying": underlying,
+        "dist_pct": (underlying - s["put_strike"]) / underlying * 100,
+        "flags": core.longput_threshold_flags(s["debit"], pnl, s["contracts"]),
+        "stale": leg["stale"], "put_mid": leg["mid"], "put_iv": leg["iv"],
+    }
+
+
 def _mark(s: dict) -> dict:
     """Current mid-price mark for an open spread, put, covered call, collar, protective put,
-    iron condor or bull call spread."""
+    iron condor, bull call spread, risk reversal, bear call / bear put spread or long put."""
+    if _is_bearcall(s):
+        return _mark_bearcall(s)
+    if _is_bearput(s):
+        return _mark_bearput(s)
+    if _is_longput(s):
+        return _mark_longput(s)
+    if _is_rr(s):
+        return _mark_rr(s)
     if _is_bullcall(s):
         return _mark_bullcall(s)
     if _is_condor(s):
@@ -278,6 +435,18 @@ def _mark(s: dict) -> dict:
 
 
 def _line(s: dict) -> str:
+    if _is_bearcall(s):
+        return (f"#{s['id']} {s['ticker']} {s['short_strike']:g}/{s['long_strike']:g} "
+                f"{ledger_mod.BEARCALL_LABEL} 到期 {s['expiry']}")
+    if _is_bearput(s):
+        strikes = "/".join(f"{s[k]:g}" for k in ledger_mod.BEARPUT_STRIKE_KEYS)
+        return f"#{s['id']} {s['ticker']} {strikes} {ledger_mod.BEARPUT_LABEL} 到期 {s['expiry']}"
+    if _is_longput(s):
+        return (f"#{s['id']} {s['ticker']} {s['put_strike']:g} {ledger_mod.LONGPUT_LABEL} "
+                f"到期 {s['expiry']}")
+    if _is_rr(s):
+        return (f"#{s['id']} {s['ticker']} {spread_report.rr_legs_text(s)} "
+                f"{ledger_mod.RR_LABEL} 到期 {s['expiry']}")
     if _is_bullcall(s):
         strikes = "/".join(f"{s[k]:g}" for k in ledger_mod.BULLCALL_STRIKE_KEYS)
         return f"#{s['id']} {s['ticker']} {strikes} {ledger_mod.BULLCALL_LABEL} 到期 {s['expiry']}"
@@ -488,8 +657,54 @@ def _bullcall_outcome(s: dict, close: float) -> tuple[float, str, None, dict]:
                                "fraction_of_max_captured": _bullcall_captured(s, pnl)}
 
 
+def _rr_outcome(s: dict, close: float) -> tuple[float, str, None, dict]:
+    """Risk reversal settlement: no exit_cost; the only extra is where the close landed."""
+    put_k, call_k = (s[k] for k in ledger_mod.RR_STRIKE_KEYS)
+    value = core.rr_expiry_value(put_k, call_k, close)
+    pnl, result = core.rr_expiry_pnl(s["net_credit"], value, s["contracts"])
+    return pnl, result, None, {"outcome_zone": core.rr_outcome_zone(put_k, call_k, close)}
+
+
+def _bearcall_outcome(s: dict, close: float) -> tuple[float, str, float, dict]:
+    """Bear call settlement: Call-direction intrinsic cost clamped to [0, width]; no extras."""
+    cost = core.bearcall_expiry_cost(s["short_strike"], s["width"], close)
+    pnl, result = core.bearcall_pnl(s["credit"], cost, s["contracts"])
+    return pnl, result, round(cost, 4) + 0.0, {}
+
+
+def _bearput_captured(s: dict, pnl: float) -> float:
+    """Signed fraction of max profit captured, round 4 (`+ 0.0` so it never stores -0.0)."""
+    return round(core.bearput_fraction_captured(pnl, s["debit"], s["width"], s["contracts"]),
+                 4) + 0.0
+
+
+def _bearput_outcome(s: dict, close: float) -> tuple[float, str, None, dict]:
+    """Bear put settlement: no exit_cost; extra = per-share exit_value and fraction captured."""
+    value = core.bearput_expiry_value(s["long_put_strike"], s["width"], close)
+    pnl, result = core.bearput_pnl(s["debit"], value, s["contracts"])
+    return pnl, result, None, {"exit_value": round(value, 4) + 0.0,
+                               "fraction_of_max_captured": _bearput_captured(s, pnl)}
+
+
+def _longput_outcome(s: dict, close: float) -> tuple[float, str, None, dict]:
+    """Long put settlement: no exit_cost; extra = per-share exit_value and fraction of debit."""
+    value = core.longput_expiry_value(s["put_strike"], close)
+    pnl, result = core.longput_pnl(s["debit"], value, s["contracts"])
+    return pnl, result, None, {
+        "exit_value": round(value, 4) + 0.0,
+        "fraction_of_debit": core.longput_fraction_of_debit(pnl, s["debit"], s["contracts"])}
+
+
 def _expiry_outcome(s: dict, close: float) -> tuple[float, str, float | None, dict]:
     """(option pnl, result, exit_cost or None, extra ledger fields) at the expiry-day close."""
+    if _is_bearcall(s):
+        return _bearcall_outcome(s, close)
+    if _is_bearput(s):
+        return _bearput_outcome(s, close)
+    if _is_longput(s):
+        return _longput_outcome(s, close)
+    if _is_rr(s):
+        return _rr_outcome(s, close)
     if _is_bullcall(s):
         return _bullcall_outcome(s, close)
     if _is_condor(s):
@@ -513,6 +728,18 @@ def _expiry_outcome(s: dict, close: float) -> tuple[float, str, float | None, di
 
 def _settle_label(s: dict, result: str, extra: dict) -> str:
     """Human label for a settlement result; the condor also names the breached side."""
+    if _is_bearcall(s):
+        return f"{WIN_LOSS_LABELS[result]}（每股平仓成本 ${extra['exit_cost']:.2f}）"
+    if _is_bearput(s):
+        return (f"{WIN_LOSS_LABELS[result]}（每股价值 ${extra['exit_value']:.2f}，"
+                f"捕获最大收益的 {extra['fraction_of_max_captured'] * 100:.1f}%）")
+    if _is_longput(s):
+        return (f"{WIN_LOSS_LABELS[result]}（每股价值 ${extra['exit_value']:.2f}，"
+                f"盈亏为净支出的 {extra['fraction_of_debit'] * 100:.1f}%）")
+    if _is_rr(s):
+        zone = extra["outcome_zone"]
+        label = f"{WIN_LOSS_LABELS[result]}（{spread_report.RR_ZONE_LABELS[zone]}）"
+        return label + (f"；{spread_report.RR_ASSIGNMENT_HINT}" if zone == "down" else "")
     if _is_bullcall(s):
         return (f"{WIN_LOSS_LABELS[result]}（每股价值 ${extra['exit_value']:.2f}，"
                 f"捕获最大收益的 {extra['fraction_of_max_captured'] * 100:.1f}%）")
@@ -568,6 +795,12 @@ def _lot_put_status_line(s: dict, m: dict) -> str:
 
 def _status_texts(s: dict) -> tuple[str, str, str]:
     """(stop tip, take-profit tip, distance label) for a flagged status line."""
+    if _is_bearcall(s):
+        return (*spread_report.BEARCALL_THRESHOLD_LABELS, spread_report.BEARCALL_DIST_LABEL)
+    if _is_bearput(s):
+        return (*spread_report.BEARPUT_THRESHOLD_LABELS, spread_report.BEARPUT_DIST_LABEL)
+    if _is_longput(s):
+        return (*spread_report.LONGPUT_THRESHOLD_LABELS, spread_report.LONGPUT_DIST_LABEL)
     if _is_bullcall(s):
         return (*spread_report.BULLCALL_THRESHOLD_LABELS, "距长腿")
     if _is_condor(s):
@@ -577,12 +810,34 @@ def _status_texts(s: dict) -> tuple[str, str, str]:
     return "🔴 已到止损线", "🟢 已到止盈线", "距短腿"
 
 
+def _rr_status_line(s: dict, m: dict) -> str:
+    """Status text for a risk reversal: premium side, position value, P&L and both distances."""
+    credit = s["net_credit"]
+    premium = f"{'净收入' if credit >= 0 else '净支出'} ${abs(credit):.2f}/股"
+    value = f"{'-' if m['value'] < 0 else ''}${abs(m['value']):.2f}"
+    tips = [t for t, hit in ((spread_report.RR_THRESHOLD_LABELS[0], m["flags"]["stop"]),
+                             (spread_report.RR_THRESHOLD_LABELS[1], m["flags"]["take_profit"]),
+                             ("报价陈旧", m["stale"])) if hit]
+    return (f"{_line(s)}：{premium}，持仓价值 {value}/股，浮盈亏 {spread_report._money(m['pnl'])}，"
+            f"距 Put 行权价 {m['dist_pct']:.1f}%，距 Call 行权价 {m['call_dist_pct']:.1f}%"
+            + (f"，{'；'.join(tips)}" if tips else ""))
+
+
 def _mark_status_line(s: dict, m: dict) -> str:
     """One status line for an open record's mark (or its error)."""
     if "error" in m:
         return f"{_line(s)}：{m['error']}"
+    if _is_rr(s):
+        return _rr_status_line(s, m)
     if _is_lot_put(s):
         return _lot_put_status_line(s, m)
+    if _is_bearcall(s) or _is_bearput(s) or _is_longput(s):
+        return _flagged_status_line(s, m)   # texts from their own _status_texts branches
+    return _flagged_status_line(s, m)
+
+
+def _flagged_status_line(s: dict, m: dict) -> str:
+    """P&L, distance and any threshold / stale tips; texts picked by `_status_texts`."""
     stop_text, tp_text, dist_label = _status_texts(s)
     tips = [t for t, hit in ((stop_text, m["flags"]["stop"]),
                              (tp_text, m["flags"]["take_profit"]),
@@ -646,8 +901,63 @@ def _bullcall_close_values(s: dict, m: dict) -> tuple[float, str, dict, str]:
                                  f"短腿 ${m['short_mid']:.2f}）")
 
 
+def _rr_close_values(s: dict, m: dict) -> tuple[float, str, dict, str]:
+    """Close both legs at their mids: pnl, win/loss, both exit mids and IVs when known.
+
+    No outcome_zone: that is written only by an expiry settlement."""
+    pnl = core.rr_close_pnl(s["net_credit"], m["exit_net"], s["contracts"])
+    fields = {"exit_short_put_mid": round(m["put_mid"], 4),
+              "exit_long_call_mid": round(m["call_mid"], 4)}
+    for key, iv in (("exit_short_put_iv", m["put_iv"]), ("exit_long_call_iv", m["call_iv"])):
+        if iv is not None:
+            fields[key] = iv
+    net = m["exit_net"]
+    return pnl, ("win" if pnl > 0 else "loss"), fields, (
+        f"平仓净成本 {'-' if net < 0 else ''}${abs(net):.2f}/股"
+        f"（Put ${m['put_mid']:.2f}、Call ${m['call_mid']:.2f}）")
+
+
+def _bearcall_close_values(s: dict, m: dict) -> tuple[float, str, dict, str]:
+    """Buy the credit spread back at the two mids (cost clamped to [0, width])."""
+    pnl, result = core.bearcall_pnl(s["credit"], m["cost"], s["contracts"])
+    return pnl, result, {"exit_cost": round(m["cost"], 4) + 0.0}, (
+        f"平仓成本 ${m['cost']:.2f}/股（短腿 ${m['short_mid']:.2f}、长腿 ${m['long_mid']:.2f}）")
+
+
+def _bearput_close_values(s: dict, m: dict) -> tuple[float, str, dict, str]:
+    """Sell the debit spread at the two mids: exit value, both mids, IVs when known."""
+    pnl, result = core.bearput_pnl(s["debit"], m["value"], s["contracts"])
+    fields = {"exit_value": round(m["value"], 4) + 0.0,
+              "exit_long_put_mid": round(m["long_mid"], 4),
+              "exit_short_put_mid": round(m["short_mid"], 4)}
+    for key, iv in (("exit_long_put_iv", m["long_iv"]), ("exit_short_put_iv", m["short_iv"])):
+        if iv is not None:
+            fields[key] = iv
+    fields["fraction_of_max_captured"] = _bearput_captured(s, pnl)
+    return pnl, result, fields, (f"平仓价值 ${m['value']:.2f}/股（长腿 ${m['long_mid']:.2f}、"
+                                 f"短腿 ${m['short_mid']:.2f}）")
+
+
+def _longput_close_values(s: dict, m: dict) -> tuple[float, str, dict, str]:
+    """Sell the put at its current mid: exit value (= the mid), IV when known, fraction of debit."""
+    pnl, result = core.longput_pnl(s["debit"], m["value"], s["contracts"])
+    fields = {"exit_value": round(m["value"], 4) + 0.0, "exit_put_mid": round(m["put_mid"], 4)}
+    if m["put_iv"] is not None:
+        fields["exit_put_iv"] = m["put_iv"]
+    fields["fraction_of_debit"] = core.longput_fraction_of_debit(pnl, s["debit"], s["contracts"])
+    return pnl, result, fields, f"平仓价值 ${m['value']:.2f}/股"
+
+
 def _close_values(s: dict, m: dict) -> tuple[float, str, dict, str]:
     """(pnl, result, extra ledger fields, cost text) for an early close at the current mark."""
+    if _is_bearcall(s):
+        return _bearcall_close_values(s, m)
+    if _is_bearput(s):
+        return _bearput_close_values(s, m)
+    if _is_longput(s):
+        return _longput_close_values(s, m)
+    if _is_rr(s):
+        return _rr_close_values(s, m)
     if _is_bullcall(s):
         return _bullcall_close_values(s, m)
     if _is_condor(s):
@@ -719,7 +1029,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="省略则自动推荐（约一周预期波动的 15%%，取整到行权价间距）")
     o = sub.add_parser("open", help="记录所选档位")
     o.add_argument("ticker", type=_ticker_arg)
-    o.add_argument("bucket", type=float, choices=core.DELTA_BUCKETS)
+    o.add_argument("bucket", type=float, choices=core.DELTA_BUCKETS, nargs="?",
+                   default=None)
+    o.add_argument("--from-pick", action="store_true",
+                   help="档位用今天 /strategy-pick TICKER 的 Bull Put 价差推荐（与档位二选一）")
     o.add_argument("--contracts", type=_positive_int, default=1)
     o.add_argument("--width", type=_positive_float, default=None,
                    help="只用于核对，必须与已保存候选的宽度一致；省略则沿用已保存的")
@@ -730,6 +1043,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 COMMANDS = {"suggest": cmd_suggest, "open": cmd_open, "status": cmd_status, "close": cmd_close}
+FROM_PICK_STRATEGY = "bull_put_spread"
 
 
 def default_ledger_dir() -> Path:
@@ -741,10 +1055,30 @@ def resolve_ledger_dir(arg: str | None) -> Path:
     return Path(arg) if arg else default_ledger_dir()
 
 
+def _from_pick(args, today: date) -> str | None:
+    """Fill the bucket from today's pick; the console line, or None."""
+    if not getattr(args, "from_pick", False):
+        return None
+    args.bucket, line = frompick.open_from_pick(args.ticker, FROM_PICK_STRATEGY, today)
+    return line
+
+
 def main(argv: list[str] | None = None, today: date | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    frompick.check_open_args(parser, args)
+    try:
+        pick_line = _from_pick(args, today or date.today())
+    except frompick.FromPickError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return frompick.EXIT_FROM_PICK
+    except option_settings.SettingsError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 1
     try:
         option_labels.print_console_header()
+        if pick_line:
+            print(pick_line)
         ledger_dir = resolve_ledger_dir(args.ledger_dir)
         return COMMANDS[args.cmd](args, ledger_dir, today or date.today())
     except (spread_data.DataError, ledger_mod.LedgerError, option_settings.SettingsError) as exc:

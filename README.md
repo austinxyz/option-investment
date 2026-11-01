@@ -28,6 +28,10 @@
 | `/collar-screen` | Collar / 保护性 Put：给假设持股设下限 |
 | `/condor-sim` | 铁鹰（Iron Condor）：赌价格留在区间里 |
 | `/bullcall-sim` | Bull Call 借方价差：净付钱的看涨策略 |
+| `/rr-sim` | 风险反转：卖虚值 Put、买虚值 Call，下行风险接近裸卖 Put |
+| `/bearcall-sim` | Call 贷方价差：看跌、净收钱，上涨亏钱（`/strategy-pick` 在不看好时推荐，也可以手动用） |
+| `/bearput-sim` | Put 借方价差：看跌、净付钱，靠赔率赚钱（`/strategy-pick` 在不看好时推荐，也可以手动用） |
+| `/longput-sim` | 买入 Put：最直接的看跌押注，每天 Theta 抽水（只能手动用） |
 | `/paper-book` | 账本总入口：`status` 看浮动盈亏并结算到期的，`close` 提前了结，`report` 看报告 |
 | `/option-review` | 每周一次：给每笔没平的单子一个建议（平仓 / 继续拿 / 需要关注） |
 | `/option-journal` | 复盘：拿历次建议和最终结果比，看建议准不准 |

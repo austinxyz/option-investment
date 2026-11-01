@@ -14,6 +14,7 @@ Natural language or explicit. Parse into one of four actions:
 |--------|---------------|-------------|
 | suggest | "给 ZZQB 出个 Call 借方价差" / "宽度 5 的" / "放宽到 14 天" | `suggest TICKER [--width W] [--min-days N]` — 不写账本 |
 | open | "ZZQB 开 0.50 档" / "开 2 张" | `open TICKER {0.60,0.50,0.40} [--contracts N] [--width W]` — 记录已保存的候选，默认 1 张 |
+| open（按推荐） | "按 /strategy-pick 的推荐开 ZZZQ" | `open TICKER --from-pick [--contracts N] [--width W]` — 档位改为读今天 `/strategy-pick TICKER` 的 Bull Call 价差推荐（Delta 目标就近放进档位，与报告里 `open` 那行同一规则），控制台先打印 `按 /strategy-pick <日期> 的结果：Delta 目标 … → 档位 …`；档位与 `--from-pick` 二选一。只读**今天**的 `data/strategy-picks/<今天>-<TICKER>.json`（demo 数据源读其下 `demo/`）：今天没跑过、文件是旧的、格式不对、推荐里没有 Bull Call 价差，都直接拒绝（退出码 2，什么都不写），不会回落到更早的结果；先重跑 `/strategy-pick TICKER`。其余校验（已保存候选、宽度核对）不变 |
 | status | "看一下模拟盘" | `status`（与 `/spread-sim` 共用 `spread_sim.py`） |
 | close | "提前平仓 #7" | `close ID`（同上） |
 
@@ -22,6 +23,7 @@ All calls run from the repo root:
 ```bash
 ./.venv/Scripts/python.exe scripts/bullcall_sim.py suggest TICKER [--width W] [--min-days N]
 ./.venv/Scripts/python.exe scripts/bullcall_sim.py open TICKER {0.60,0.50,0.40} [--contracts N] [--width W]
+./.venv/Scripts/python.exe scripts/bullcall_sim.py open TICKER --from-pick [--contracts N] [--width W]
 ./.venv/Scripts/python.exe scripts/bullcall_sim.py status
 ./.venv/Scripts/python.exe scripts/bullcall_sim.py close ID
 ```

@@ -5,7 +5,8 @@ See docs/superpowers/specs/2026-10-26-delta-target-handoff-design.md (D1, D2, 6.
 comes from the constants the leaf table and the target tools already use (the target ranges
 arrive in `delta_target`, the buckets from spread_core, the --delta range and walk floor from
 put_screen_rules), so a changed constant moves the hand-off with it instead of drifting.
-Only strategy_pick_render imports this module; rules / text must not import it.
+Only strategy_pick_render and strategy_pick_frompick (the downstream commands' --from-pick)
+import this module; rules / text must not import it.
 """
 from __future__ import annotations
 
@@ -23,18 +24,23 @@ HANDOFF_KIND = {
     "bull_call_spread": "bucket_bullcall",
     "collar": "no_delta_collar",
     "protective_put": "no_delta_collar",
+    "bear_put_spread": "bucket_bearput",
+    "bear_call_spread": "bucket_bearcall",
 }
 # The leg whose range picks the bucket / --delta, and the buckets the tool's `open` accepts.
 _LEG_BY_KIND = {"screen_put": "short_put", "screen_call": "short_call",
                 "bucket_spread": "short_put", "bucket_condor": "short_put",
-                "bucket_bullcall": "long_call"}
+                "bucket_bullcall": "long_call", "bucket_bearput": "long_put",
+                "bucket_bearcall": "short_call"}
 _BUCKETS_BY_KIND = {"bucket_spread": spread_core.DELTA_BUCKETS,
                     "bucket_condor": spread_core.DELTA_BUCKETS,
-                    "bucket_bullcall": spread_core.BULLCALL_DELTA_BUCKETS}
+                    "bucket_bullcall": spread_core.BULLCALL_DELTA_BUCKETS,
+                    "bucket_bearput": spread_core.BEARPUT_DELTA_BUCKETS,
+                    "bucket_bearcall": spread_core.DELTA_BUCKETS}
 _ALT_WORD = {"short": "更价外的", "long": "更便宜的"}
 _TIE_PRECISION = 9  # round distances so float noise never decides a tie
 _SECTION_TITLE = "### 把 Delta 目标带到下一步"
-_CALL_ALL_HOLDINGS = "；它扫全部持股，`--delta` 对这次扫的每只持股都生效"
+CALL_ALL_HOLDINGS = "；它扫全部持股，`--delta` 对这次扫的每只持股都生效"
 _COLLAR_TAIL = ("，它不按 Delta 选：按现价 90% / 85% / 80% 三档列出 Put{call}，"
                 'Delta 目标带不过去；对照上表"参考价位"挑最接近的一档')
 _COLLAR_CALL = "（Collar 的 Call 取零成本）"
@@ -84,10 +90,37 @@ def _checked_range(strategy: str, kind: str, delta_target: Sequence) -> tuple[fl
     return low, high
 
 
-def _bucket_handoff(strategy: str, kind: str, delta_target: Sequence, ticker: str) -> Handoff:
+def target_range(strategy: str, delta_target: Sequence) -> tuple[float, float]:
+    """(low, high) of the leg that picks the bucket / --delta; ValueError if it cannot."""
+    return _checked_range(strategy, HANDOFF_KIND[strategy], delta_target)
+
+
+def _buckets_for(strategy: str, delta_target: Sequence) -> tuple[float, tuple[float, ...]]:
+    kind = HANDOFF_KIND[strategy]
+    if kind not in _BUCKETS_BY_KIND:
+        raise ValueError(f"{strategy} has no open bucket")
     low, high = _checked_range(strategy, kind, delta_target)
+    return nearest_bucket(low, high, _BUCKETS_BY_KIND[kind], _LEG_BY_KIND[kind])
+
+
+def open_bucket(strategy: str, delta_target: Sequence) -> float:
+    """Main bucket for `open T <bucket>` (alternatives dropped)."""
+    return _buckets_for(strategy, delta_target)[0]
+
+
+def screen_delta(strategy: str, delta_target: Sequence) -> float:
+    """--delta for /put-screen or /call-screen: the range's upper end, clamped, 2 decimals."""
+    kind = HANDOFF_KIND[strategy]
+    if kind not in ("screen_put", "screen_call"):
+        raise ValueError(f"{strategy} has no screen --delta")
+    _, high = _checked_range(strategy, kind, delta_target)
+    # The range's upper end is always a legal --delta; the walk-down then covers the rest.
+    return round(min(max(high, psr.DELTA_ARG_MIN), psr.DELTA_ARG_MAX), 2)
+
+
+def _bucket_handoff(strategy: str, kind: str, delta_target: Sequence, ticker: str) -> Handoff:
     leg = _LEG_BY_KIND[kind]
-    main, alts = nearest_bucket(low, high, _BUCKETS_BY_KIND[kind], leg)
+    main, alts = _buckets_for(strategy, delta_target)
     opens = tuple(f"open {ticker} {b:.2f}" for b in (main, *alts))
     note = f"，再 `{opens[0]}`"
     if alts:
@@ -97,9 +130,7 @@ def _bucket_handoff(strategy: str, kind: str, delta_target: Sequence, ticker: st
 
 
 def _screen_handoff(strategy: str, kind: str, delta_target: Sequence, ticker: str) -> Handoff:
-    _, high = _checked_range(strategy, kind, delta_target)
-    # The range's upper end is always a legal --delta; the walk-down then covers the rest.
-    target = round(min(max(high, psr.DELTA_ARG_MIN), psr.DELTA_ARG_MAX), 2)
+    target = screen_delta(strategy, delta_target)
     command = T.NEXT_COMMANDS[strategy].format(ticker=ticker)
     if kind == "screen_put":
         command += f" --tickers {ticker}"
@@ -107,7 +138,7 @@ def _screen_handoff(strategy: str, kind: str, delta_target: Sequence, ticker: st
         command += f" --delta {target:.2f}"
     note = f"（目标 {target:.2f}，价差过宽时往外最多到 {psr.walk_floor(target):.2f}）"
     if kind == "screen_call":
-        note += _CALL_ALL_HOLDINGS
+        note += CALL_ALL_HOLDINGS
     return Handoff(command, (), note)
 
 

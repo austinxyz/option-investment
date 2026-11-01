@@ -8,8 +8,8 @@ from __future__ import annotations
 import html
 from datetime import date
 
-from spread_ledger import (BULLCALL_LABEL, STRATEGY_BULL_CALL, STRATEGY_BULL_PUT, STRATEGY_COVERED_CALL,
-                           STRATEGY_IRON_CONDOR, strategy_of)
+from spread_ledger import (BULLCALL_LABEL, RR_LABEL, STRATEGY_BULL_CALL, STRATEGY_BULL_PUT,
+                           STRATEGY_COVERED_CALL, STRATEGY_IRON_CONDOR, STRATEGY_RR, strategy_of)
 from spread_report import (BULLCALL_THRESHOLD_LABELS, CONDOR_FOOTER, CONDOR_LEGS_HEAD, KNOWN_STRATEGIES, LOT_PUT_NOTE,
                            LOT_PUT_STRATEGIES, MIN_SAMPLE, SETTLED, SINGLE_SPREAD_STATS, STRATEGY_CSP,
                            breached_label, capital_at_risk, compute_stats, compute_strategy_stats,
@@ -20,6 +20,11 @@ from spread_report import _open_pct, _pnl_ratio, _spct
 from spread_report_bullcall import (BULLCALL_FOOTER, BULLCALL_LEGS_HEAD, BULLCALL_TERMS_HEAD,
                                     captured_label, how_label, pnl_pct, required_avg_label,
                                     signed_pct, term_cells)
+from spread_report_rr import (RR_COMPARE_NOTE, RR_FOOTER, RR_LEGS_HEAD, RR_TERMS_HEAD,
+                              expiry_close_cell, mark_cells, pct_text, reminder_lines, settled_rr, zone_label,
+                              zone_summary_text, whole_dollars)
+from spread_report_rr import how_label as rr_how_label, term_cells as rr_term_cells
+import spread_report_bearish as bearish
 
 e = html.escape
 
@@ -146,21 +151,29 @@ def _kpi_pair(label: str, rows: list[dict]) -> str:
             f'<div class="kpi"><span>{label}已实现盈亏</span><b>{money(sum(s["pnl"] for s in rows))}</b></div>')
 
 
-def _settled_kpis(st: dict, condors: list[dict], bullcalls: list[dict]) -> str:
-    """Settled KPIs; with settled condors or bull calls the spread figures are labelled as such
-    and each of those gets its own pair, so a '0 笔' never sits above a table of their rows."""
-    tag = "（Put 贷方价差）" if condors or bullcalls else ""
+def _settled_kpis(st: dict, condors: list[dict], bullcalls: list[dict], rrs: list[dict],
+                  bearish: tuple[tuple[str, list[dict]], ...] = ()) -> str:
+    """Settled KPIs; with settled condors, bull calls, risk reversals or bearish strategies the
+    spread figures are labelled as such and each of those gets its own pair, so a '0 笔' never
+    sits above a table of their rows. `bearish` is (label, settled rows) per bearish strategy."""
+    present = tuple((label, rows) for label, rows in bearish if rows)
+    tag = "（Put 贷方价差）" if condors or bullcalls or rrs or present else ""
     out = (f'<div class="kpi"><span>已结算{tag}</span><b>{st["n_settled"]} 笔</b></div>'
            f'<div class="kpi"><span>已实现盈亏{tag}</span><b>{money(st["total_pnl"])}</b></div>')
     if condors:
         out += _kpi_pair("铁鹰", condors)
     if bullcalls:
         out += _kpi_pair(BULLCALL_LABEL, bullcalls)
+    if rrs:
+        out += _kpi_pair(RR_LABEL, rrs)
+    for label, rows in present:
+        out += _kpi_pair(label, rows)
     return out
 
 
 def _summary(open_: list[dict], marks: dict, st: dict, condors: list[dict],
-             bullcalls: list[dict]) -> str:
+             bullcalls: list[dict], rrs: list[dict],
+             bearish: tuple[tuple[str, list[dict]], ...] = ()) -> str:
     capital = sum(capital_at_risk(s) for s in open_)  # same basis as the markdown report
     # Collar / protective-put pnl has a different base (cost x shares): shown in its own table.
     valid = [marks[s["id"]]["pnl"] for s in open_ if s["id"] in marks and "pnl" in marks[s["id"]]
@@ -171,7 +184,7 @@ def _summary(open_: list[dict], marks: dict, st: dict, condors: list[dict],
             f'<div class="kpi"><span>未平仓</span><b>{len(open_)} 笔</b></div>'
             f'<div class="kpi"><span>占用资金合计</span><b>{money(capital, False)}</b></div>'
             f'<div class="kpi"><span>浮盈亏合计</span><b class="{ucls}">{unreal}</b></div>'
-            f'{_settled_kpis(st, condors, bullcalls)}</div>')
+            f'{_settled_kpis(st, condors, bullcalls, rrs, bearish)}</div>')
 
 
 def _bucket_cell(s: dict) -> str:
@@ -328,6 +341,109 @@ def _bullcall_required_html(records: list[dict]) -> str:
             '上表的盈亏平衡胜率按实际盈亏比算，口径不同。</div>')
 
 
+RR_TERMS_TH = "".join(f"<th>{h}</th>" for h in RR_TERMS_HEAD)
+
+
+def _rr_mark_cells(m: dict | None) -> tuple[str, str, str]:
+    """(pnl, distance above the put strike, note) html cells."""
+    pnl, dist, note = mark_cells(m)
+    if m is None or "error" in m:
+        return pnl, dist, e(note)
+    cls = "good" if round(m["pnl"]) > 0 else "bad" if round(m["pnl"]) < 0 else "mut"
+    return f'<b class="{cls}">{pnl}</b>', dist, e(note)
+
+
+def _rr_open_row(s: dict, marks: dict) -> str:
+    m = marks.get(s["id"])
+    pnl, dist, note = _rr_mark_cells(m)
+    usable = None if m is None or "error" in m else m["pnl"]
+    terms = "".join(f"<td>{e(c)}</td>" for c in rr_term_cells(s))
+    return (f'<tr><td>{s["id"]}</td><td>{e(s["ticker"])}</td><td>{e(legs_label(s))}</td>'
+            f'<td>{e(s["expiry"])}</td><td>{s["contracts"]}</td>{terms}<td>{pnl}</td>'
+            f'<td>{pct_text(_pnl_ratio(usable, s))}</td><td>{dist}</td><td>{note}</td></tr>')
+
+
+def _rr_reminders_html() -> str:
+    return "".join(f'<div class="note">{e(line.lstrip("> "))}</div>' for line in reminder_lines() if line)
+
+
+def _rr_open_table(rows: list[dict], marks: dict) -> str:
+    """Open risk reversals: own terms (conservative capital, uncapped upside), no payoff card."""
+    if not rows:
+        return ""
+    body = "".join(_rr_open_row(s, marks) for s in rows)
+    return (f'<h3>{RR_LABEL}（Risk Reversal）</h3>{_rr_reminders_html()}<div class="tw"><table><thead><tr>'
+            f'<th>#</th><th>标的</th><th>{RR_LEGS_HEAD}</th><th>到期</th><th>张数</th>{RR_TERMS_TH}'
+            '<th>浮盈亏</th><th>盈亏%</th><th>距 Put 行权价</th><th>提示</th></tr></thead>'
+            f'<tbody>{body}</tbody></table></div>')
+
+
+def _rr_settled_row(s: dict) -> str:
+    cls = "good" if round(s["pnl"]) > 0 else "bad" if round(s["pnl"]) < 0 else "mut"
+    close, value = expiry_close_cell(s)
+    terms = "".join(f"<td>{e(c)}</td>" for c in rr_term_cells(s))
+    return (f'<tr><td>{s["id"]}</td><td>{e(s["ticker"])}</td><td>{e(legs_label(s))}</td>'
+            f'<td>{e(s["expiry"])}</td>{terms}<td>{close}</td><td>{value}</td>'
+            f'<td>{rr_how_label(s)}</td><td>{e(str(s["result"]))}</td>'
+            f'<td class="{cls}">{whole_dollars(s["pnl"])}</td>'
+            f'<td>{pct_text(_pnl_ratio(s["pnl"], s))}</td><td>{e(zone_label(s))}</td></tr>')
+
+
+def _rr_settled_table(records: list[dict]) -> str:
+    rows = settled_rr(records)
+    if not rows:
+        return ""
+    body = "".join(_rr_settled_row(s)
+                   for s in sorted(rows, key=lambda r: (r["expiry"], r["id"]), reverse=True))
+    return (f'<h3>{RR_LABEL}（Risk Reversal，已结算）</h3>'
+            f'<div class="note">到期结局：{zone_summary_text(records)}（提前平仓不记结局区）</div>'
+            '<div class="tw"><table><thead><tr>'
+            f'<th>#</th><th>标的</th><th>{RR_LEGS_HEAD}</th><th>到期</th>{RR_TERMS_TH}'
+            '<th>到期收盘</th><th>期权腿合计/股</th><th>方式</th><th>结果</th><th>盈亏</th>'
+            f'<th>盈亏%</th><th>结局区</th></tr></thead><tbody>{body}</tbody></table></div>')
+
+
+def _rr_compare_html(records: list[dict]) -> str:
+    if not any(strategy_of(s) == STRATEGY_RR for s in records):
+        return ""
+    return f'<div class="note">{e(RR_COMPARE_NOTE.lstrip("> "))}</div>'
+
+
+def _bearish_tr(cells: list[str]) -> str:
+    return "<tr>" + "".join(f"<td>{e(c)}</td>" for c in cells) + "</tr>"
+
+
+def _bearish_thead(head: list[str]) -> str:
+    return "<thead><tr>" + "".join(f"<th>{e(h)}</th>" for h in head) + "</tr></thead>"
+
+
+def _bearish_notes(lines: list[str]) -> str:
+    """Markdown note / summary lines ('> …', '- …') as html note boxes."""
+    return "".join(f'<div class="note">{e(line.lstrip("> ").removeprefix("- "))}</div>'
+                   for line in lines if line)
+
+
+def _bearish_open_table(spec: bearish.BearishSpec, rows: list[dict], marks: dict) -> str:
+    """Open bearish records: own terms per strategy, no credit-spread payoff card."""
+    if not rows:
+        return ""
+    body = "".join(_bearish_tr(bearish.open_cells(spec, s, marks)) for s in rows)
+    return (f'<h3>{e(spec.html_title)}</h3>{_bearish_notes([spec.note, *bearish.reminder_lines(spec)])}'
+            f'<div class="tw"><table>{_bearish_thead(bearish.open_head(spec))}'
+            f'<tbody>{body}</tbody></table></div>')
+
+
+def _bearish_settled_table(spec: bearish.BearishSpec, records: list[dict]) -> str:
+    rows = bearish.sorted_settled(bearish.rows_of(spec, records))
+    if not rows:
+        return ""
+    body = "".join(_bearish_tr(bearish.settled_cells(spec, s)) for s in rows)
+    summary = _bearish_notes(bearish.summary_lines(spec, bearish.rows_of(spec, records)))
+    return (f'<h3>{e(spec.html_settled_title)}</h3>{summary}'
+            f'<div class="tw"><table>{_bearish_thead(bearish.settled_head(spec))}'
+            f'<tbody>{body}</tbody></table></div>')
+
+
 def _lot_float_cell(s: dict, marks: dict) -> str:
     m = marks.get(s["id"])
     if m is None:
@@ -384,7 +500,8 @@ def _strategy_table(records: list[dict]) -> str:
     return ('<h3>按策略对比</h3><div class="tw"><table><thead><tr><th>策略</th><th>已结算</th><th>胜率</th>'
             '<th>总盈亏</th><th>盈亏平衡胜率</th><th>是否过线</th></tr></thead>'
             f'<tbody>{body}</tbody></table></div>{_condor_theory_html(records)}'
-            f'{_bullcall_required_html(records)}{warn}')
+            f'{_bullcall_required_html(records)}{_rr_compare_html(records)}'
+            f'{_bearish_notes(bearish.compare_notes(records))}{warn}')
 
 
 def _settled(spreads: list[dict], quiet: bool = False) -> str:
@@ -438,7 +555,9 @@ def _open_cards(open_: list[dict], marks: dict, today: str) -> str:
             + _csp_open_table(of(STRATEGY_CSP), marks) + _cc_open_table(of(STRATEGY_COVERED_CALL), marks)
             + (_lot_open_table(lots, marks) if lots else "")
             + _condor_open_table(of(STRATEGY_IRON_CONDOR), marks)
-            + _bullcall_open_table(of(STRATEGY_BULL_CALL), marks))
+            + _bullcall_open_table(of(STRATEGY_BULL_CALL), marks)
+            + _rr_open_table(of(STRATEGY_RR), marks)
+            + "".join(_bearish_open_table(spec, of(spec.key), marks) for spec in bearish.SPECS))
 
 
 def render_report_html(spreads: list[dict], marks: dict | None, generated_on: str) -> str:
@@ -452,21 +571,28 @@ def render_report_html(spreads: list[dict], marks: dict | None, generated_on: st
                 if any(strategy_of(s) in LOT_PUT_STRATEGIES for s in spreads) else "")
     settled_condors = _settled_of(spreads, STRATEGY_IRON_CONDOR)
     settled_bullcalls = _settled_of(spreads, STRATEGY_BULL_CALL)
+    settled_rrs = _settled_of(spreads, STRATEGY_RR)
+    settled_bearish = tuple((spec.label, _settled_of(spreads, spec.key)) for spec in bearish.SPECS)
+    any_bearish = any(rows for _, rows in settled_bearish)
+    bearish_settled = "".join(_bearish_settled_table(spec, spreads) for spec in bearish.SPECS)
     condor_note = (CONDOR_FOOTER if any(strategy_of(s) == STRATEGY_IRON_CONDOR for s in spreads)
                    else "")
     if any(strategy_of(s) == STRATEGY_BULL_CALL for s in spreads):
         condor_note += BULLCALL_FOOTER
+    if any(strategy_of(s) == STRATEGY_RR for s in spreads):
+        condor_note += RR_FOOTER
+    condor_note += bearish.footers(spreads)
     gap = "—" if st["avg_abs_gap"] is None else f'{st["avg_abs_gap"]:.2f}%'
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>垂直 Put 贷方价差与现金担保 Put 纸上交易 {e(generated_on)}</title><style>{CSS}</style></head><body><div class="wrap">
 <h1>垂直 Put 贷方价差与现金担保 Put 纸上交易</h1>
 <p class="sub">Bull Put Credit Spread · 生成于 {e(generated_on)} · 由 /spread-sim status 自动生成，只读</p>
-{_summary(open_, marks, st, settled_condors, settled_bullcalls)}
+{_summary(open_, marks, st, settled_condors, settled_bullcalls, settled_rrs, settled_bearish)}
 <h2>未平仓</h2>
 {cards}
 <h2>已结算</h2>
-{_settled(spreads, bool(settled_condors or settled_bullcalls))}{_lot_settled_table(spreads)}{_condor_settled_table(spreads)}{_bullcall_settled_table(spreads)}
+{_settled(spreads, bool(settled_condors or settled_bullcalls or settled_rrs or any_bearish))}{_lot_settled_table(spreads)}{_condor_settled_table(spreads)}{_bullcall_settled_table(spreads)}{_rr_settled_table(spreads)}{bearish_settled}
 <h2>累积统计</h2>
 {_stats(st)}{_strategy_table(spreads)}
 <h2>开仓价假设的偏差</h2>

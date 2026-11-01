@@ -20,7 +20,8 @@ import spread_core as core
 import spread_data
 import spread_ledger as ledger_mod
 import spread_sim
-from spread_ledger import BULLCALL_STRIKE_KEYS, CONDOR_STRIKE_KEYS
+from spread_ledger import (BEARPUT_STRIKE_KEYS, BULLCALL_STRIKE_KEYS, CONDOR_STRIKE_KEYS,
+                           RR_STRIKE_KEYS)
 
 REVIEWS_DIR = "reviews"
 ADVICE_LABEL = {
@@ -30,6 +31,10 @@ ADVICE_ORDER = ("close", "hold", "attention", "await_settlement")
 NO_QUOTE = "期权链里找不到这条腿的有效报价"
 NO_CONDOR_QUOTE = "期权链里找不到这四条腿的有效报价"
 NO_BULLCALL_QUOTE = "期权链里找不到这两腿的有效报价"
+NO_RR_QUOTE = "期权链里找不到这两腿的有效报价"
+# Rule 0 prefixes these with "取不到报价："; the shared spread_report text already carries it.
+NO_BEARCALL_QUOTE = NO_BEARPUT_QUOTE = "期权链里找不到这两腿的有效报价"
+NO_LONGPUT_QUOTE = NO_QUOTE
 
 
 def _is_lot_put(s: dict) -> bool:
@@ -80,8 +85,71 @@ def _neutral_bullcall(s: dict, days_left: int) -> dict:
     }
 
 
+def _is_rr(s: dict) -> bool:
+    return ledger_mod.strategy_of(s) == ledger_mod.STRATEGY_RR
+
+
+def _neutral_rr(s: dict, days_left: int) -> dict:
+    """Risk reversal row: short put + long call strikes and net_credit; no credit / short_strike /
+    long_strike. `delta` mirrors the short put's |Delta| (the only Delta a rule may use)."""
+    return {
+        "id": s["id"], "strategy": ledger_mod.STRATEGY_RR, "ticker": s["ticker"],
+        "expiry": s["expiry"], **{k: s[k] for k in RR_STRIKE_KEYS},
+        "net_credit": s["net_credit"], "days_left": days_left, "spot": None,
+        "put_mid": None, "call_mid": None, "pnl": None, "captured": None, "stop_flag": False,
+        "take_profit_flag": False, "short_put_delta": None, "long_call_delta": None,
+        "delta": None, "ex_div": None, "data_ok": True, "earnings": "unknown", "error": None,
+    }
+
+
+def _neutral_bearcall(s: dict, days_left: int) -> dict:
+    """Bear call credit spread row: the seller spread fields (call side). `delta` will be the
+    short call's |Delta|, the only Delta a rule may use."""
+    return {
+        "id": s["id"], "strategy": ledger_mod.STRATEGY_BEAR_CALL, "ticker": s["ticker"],
+        "expiry": s["expiry"], "short_strike": s["short_strike"], "long_strike": s["long_strike"],
+        "credit": s["credit"], "width": s["width"], "days_left": days_left, "spot": None,
+        "cost_to_close": None, "pnl": None, "itm": False, "stop_flag": False, "captured": None,
+        "delta": None, "ex_div": None, "data_ok": True, "earnings": "unknown", "error": None,
+    }
+
+
+def _neutral_bearput(s: dict, days_left: int) -> dict:
+    """Bear put debit spread row: two explicit put strikes and the debit; no credit /
+    short_strike / long_strike. `delta` stays None: no Delta rule applies to a buyer."""
+    return {
+        "id": s["id"], "strategy": ledger_mod.STRATEGY_BEAR_PUT, "ticker": s["ticker"],
+        "expiry": s["expiry"], **{k: s[k] for k in BEARPUT_STRIKE_KEYS},
+        "debit": s["debit"], "width": s["width"], "days_left": days_left, "spot": None,
+        "value": None, "pnl": None, "captured": None, "stop_flag": False,
+        "take_profit_flag": False, "long_put_delta": None, "delta": None, "ex_div": None,
+        "data_ok": True, "earnings": "unknown", "error": None,
+    }
+
+
+def _neutral_longput(s: dict, days_left: int) -> dict:
+    """Long put row: one put strike and the debit; `delta` stays None (buyer, no Delta rule)."""
+    return {
+        "id": s["id"], "strategy": ledger_mod.STRATEGY_LONG_PUT, "ticker": s["ticker"],
+        "expiry": s["expiry"], "put_strike": s["put_strike"], "debit": s["debit"],
+        "days_left": days_left, "spot": None, "value": None, "pnl": None, "captured": None,
+        "stop_flag": False, "take_profit_flag": False, "put_delta": None, "delta": None,
+        "ex_div": None, "data_ok": True, "earnings": "unknown", "error": None,
+    }
+
+
+NEUTRAL_OWN = {ledger_mod.STRATEGY_BEAR_CALL: _neutral_bearcall,
+               ledger_mod.STRATEGY_BEAR_PUT: _neutral_bearput,
+               ledger_mod.STRATEGY_LONG_PUT: _neutral_longput}
+
+
 def _neutral(s: dict, days_left: int) -> dict:
     """Display fields plus neutral metrics; gather fills in what it can."""
+    own = NEUTRAL_OWN.get(ledger_mod.strategy_of(s))
+    if own is not None:  # before anything that reads seller fields: this runs outside the try
+        return own(s, days_left)
+    if _is_rr(s):  # before anything that reads seller fields: this runs outside the try
+        return _neutral_rr(s, days_left)
     if _is_bullcall(s):  # before anything that reads seller fields: this runs outside the try
         return _neutral_bullcall(s, days_left)
     if _is_condor(s):
@@ -201,8 +269,122 @@ def _measure_bullcall(s: dict, m: dict, today: date) -> dict:
     }
 
 
+def _rr_leg_delta(side: str, quote: dict, spot: float, days_left: int) -> float | None:
+    """|Delta| of one risk reversal leg, or None when the quote has neither a broker delta nor a usable iv."""
+    if not (core.has_delta(quote) or core._usable_iv(quote["iv"])):
+        return None
+    return core.delta_for(side, quote, spot, days_left)[0]
+
+
+def _measure_rr(s: dict, m: dict, today: date) -> dict:
+    legs = spread_sim._rr_legs(s)  # put chain for the short put, call chain for the long call
+    if legs is None:
+        return {**m, "error": NO_RR_QUOTE}
+    spot = spread_data.last_close(s["ticker"])[1]
+    if not core._usable(spot):
+        return {**m, "error": "现价无效"}
+    put_mid, call_mid = legs["put"]["mid"], legs["call"]["mid"]
+    pnl = core.rr_close_pnl(s["net_credit"], core.rr_exit_net(put_mid, call_mid), s["contracts"])
+    flags = core.rr_threshold_flags(s["short_put_mid"], pnl, s["contracts"])
+    put_delta = _rr_leg_delta("P", legs["put"], spot, m["days_left"])
+    data_ok = put_delta is not None and all(_leg_trusted(q) for q in legs.values())
+    put_delta = put_delta if data_ok else None  # Delta is recorded and used only from trusted data
+    call_delta = _rr_leg_delta("C", legs["call"], spot, m["days_left"]) if data_ok else None
+    return {
+        **m, "spot": spot, "put_mid": put_mid, "call_mid": call_mid, "pnl": pnl,
+        "stop_flag": bool(flags["stop"]), "take_profit_flag": bool(flags["take_profit"]),
+        "short_put_delta": put_delta, "delta": put_delta, "long_call_delta": call_delta,
+        "data_ok": data_ok,
+        "earnings": spread_data.earnings_status(s["ticker"], today, date.fromisoformat(s["expiry"])),
+    }
+
+
+def _earnings(s: dict, today: date) -> str:
+    return spread_data.earnings_status(s["ticker"], today, date.fromisoformat(s["expiry"]))
+
+
+def _bearcall_ex_div(s: dict, today: date) -> str | None:
+    """Called only once the short call is strictly in the money (early-assignment risk)."""
+    found = spread_data.ex_dividend_in_window(s["ticker"], today, date.fromisoformat(s["expiry"]))
+    return found.isoformat() if found else None
+
+
+def _measure_bearcall(s: dict, m: dict, today: date) -> dict:
+    legs = spread_sim._bearcall_legs(s)  # call chain, strikes=(short, long), never guessed
+    if legs is None:
+        return {**m, "error": NO_BEARCALL_QUOTE}
+    spot = spread_data.last_close(s["ticker"])[1]
+    if not core._usable(spot):
+        return {**m, "error": "现价无效"}
+    cost = core.bearcall_close_cost(legs["short"]["mid"], legs["long"]["mid"], s["width"])
+    pnl, _ = core.bearcall_pnl(s["credit"], cost, s["contracts"])
+    flags = core.threshold_flags(s["credit"], s["width"], pnl, s["contracts"])
+    short = legs["short"]
+    data_ok = ((core.has_delta(short) or core._usable_iv(short["iv"]))
+               and all(_leg_trusted(q) for q in legs.values()))
+    itm = core.bearcall_in_the_money(spot, s["short_strike"])
+    return {
+        **m, "spot": spot, "cost_to_close": cost, "pnl": pnl,
+        "captured": (s["credit"] - cost) / s["credit"], "itm": itm,
+        "stop_flag": bool(flags["stop"]), "data_ok": data_ok,
+        "delta": core.delta_for("C", short, spot, m["days_left"])[0] if data_ok else None,
+        "ex_div": _bearcall_ex_div(s, today) if itm else None, "earnings": _earnings(s, today),
+    }
+
+
+def _measure_bearput(s: dict, m: dict, today: date) -> dict:
+    legs = spread_sim._bearput_legs(s)  # put chain, strikes=(long, short), never guessed
+    if legs is None:
+        return {**m, "error": NO_BEARPUT_QUOTE}
+    spot = spread_data.last_close(s["ticker"])[1]
+    if not core._usable(spot):
+        return {**m, "error": "现价无效"}
+    value = core.bearput_close_value(legs["long"]["mid"], legs["short"]["mid"], s["width"])
+    pnl, _ = core.bearput_pnl(s["debit"], value, s["contracts"])
+    flags = core.bearput_threshold_flags(s["debit"], s["width"], pnl, s["contracts"])
+    data_ok = all(_leg_trusted(q) for q in legs.values())
+    return {
+        **m, "spot": spot, "value": value, "pnl": pnl,
+        "captured": core.bearput_fraction_captured(pnl, s["debit"], s["width"], s["contracts"]),
+        "stop_flag": bool(flags["stop"]), "take_profit_flag": bool(flags["take_profit"]),
+        "long_put_delta": (_rr_leg_delta("P", legs["long"], spot, m["days_left"])
+                           if data_ok else None),  # reference only, never used by a rule
+        "data_ok": data_ok, "earnings": _earnings(s, today),
+    }
+
+
+def _measure_longput(s: dict, m: dict, today: date) -> dict:
+    leg = spread_sim._longput_leg(s)  # put chain, strikes=(put_strike,), never guessed
+    if leg is None:
+        return {**m, "error": NO_LONGPUT_QUOTE}
+    spot = spread_data.last_close(s["ticker"])[1]
+    if not core._usable(spot):
+        return {**m, "error": "现价无效"}
+    value = leg["mid"]
+    pnl, _ = core.longput_pnl(s["debit"], value, s["contracts"])
+    flags = core.longput_threshold_flags(s["debit"], pnl, s["contracts"])
+    data_ok = _leg_trusted(leg)
+    return {
+        **m, "spot": spot, "value": value, "pnl": pnl,
+        "captured": core.longput_fraction_of_debit(pnl, s["debit"], s["contracts"]),
+        "stop_flag": bool(flags["stop"]), "take_profit_flag": bool(flags["take_profit"]),
+        "put_delta": _rr_leg_delta("P", leg, spot, m["days_left"]) if data_ok else None,
+        "data_ok": data_ok, "earnings": _earnings(s, today),
+    }
+
+
+MEASURE_OWN = {ledger_mod.STRATEGY_BEAR_CALL: _measure_bearcall,
+               ledger_mod.STRATEGY_BEAR_PUT: _measure_bearput,
+               ledger_mod.STRATEGY_LONG_PUT: _measure_longput}
+
+
 def _measure(s: dict, m: dict, today: date) -> dict:
     """One chain fetch: price the position and derive the short-leg delta."""
+    own = MEASURE_OWN.get(ledger_mod.strategy_of(s))
+    if own is not None:
+        return own(s, m, today)
+    if _is_rr(s):
+        return _measure_rr(s, m, today)
     if _is_bullcall(s):
         return _measure_bullcall(s, m, today)
     if _is_condor(s):
@@ -266,6 +448,14 @@ def _review(m: dict) -> dict:
 
 
 def _strikes(r: dict) -> str:
+    if r["strategy"] == ledger_mod.STRATEGY_BEAR_CALL:
+        return f"{r['short_strike']:g}/{r['long_strike']:g}"  # short/long call
+    if r["strategy"] == ledger_mod.STRATEGY_BEAR_PUT:
+        return "/".join(f"{r[k]:g}" for k in BEARPUT_STRIKE_KEYS)  # long/short put
+    if r["strategy"] == ledger_mod.STRATEGY_LONG_PUT:
+        return f"{r['put_strike']:g}"
+    if r["strategy"] == ledger_mod.STRATEGY_RR:
+        return "/".join(f"{r[k]:g}" for k in RR_STRIKE_KEYS)  # short put/long call
     if r["strategy"] == ledger_mod.STRATEGY_BULL_CALL:
         return "/".join(f"{r[k]:g}" for k in BULLCALL_STRIKE_KEYS)  # long/short
     if r["strategy"] == ledger_mod.STRATEGY_IRON_CONDOR:
@@ -282,7 +472,8 @@ def _strikes(r: dict) -> str:
 def _cells(r: dict) -> list[str]:
     spot = "—" if r["spot"] is None else f"{r['spot']:.2f}"
     cap = "—" if r["captured"] is None else f"{r['captured']:.0%}"
-    delta = "—" if r["delta"] is None else f"{r['delta']:.2f}"  # always None for a bull call
+    # always None for a buyer (bull call, bear put, long put): no Delta rule applies to them
+    delta = "—" if r["delta"] is None else f"{r['delta']:.2f}"
     return [str(r["id"]), r["strategy"], r["ticker"], _strikes(r), r["expiry"],
             str(r["days_left"]), spot, cap, delta, r["earnings"],
             ADVICE_LABEL[r["advice"]], r["reason"]]

@@ -6,9 +6,10 @@ snapshots.
 """
 from __future__ import annotations
 
-from spread_core import breakeven_win_rate, bullcall_required_win_rate
-from spread_ledger import (STRATEGY_BULL_CALL, STRATEGY_COLLAR, STRATEGY_IRON_CONDOR,
-                           STRATEGY_PROTECTIVE_PUT, strategy_of)
+from spread_core import breakeven_win_rate, bearput_required_win_rate, bullcall_required_win_rate
+from spread_ledger import (STRATEGY_BEAR_CALL, STRATEGY_BEAR_PUT, STRATEGY_BULL_CALL,
+                           STRATEGY_COLLAR, STRATEGY_IRON_CONDOR, STRATEGY_LONG_PUT,
+                           STRATEGY_PROTECTIVE_PUT, STRATEGY_RR, strategy_of)
 
 MIN_SAMPLE = 30
 SETTLED_STATUSES = ("expired", "closed_early")
@@ -18,7 +19,14 @@ LOT_PUT_STRATEGIES = (STRATEGY_COLLAR, STRATEGY_PROTECTIVE_PUT)
 LOT_PUT_RESULTS = ("called_away", "protected", "expired_worthless", "closed")
 # A condor has no credit / short_strike either; its own block keeps it out of A-D.
 # A bull call debit spread pays a debit (no credit) and also gets its own block.
-NOT_CASE_STRATEGIES = LOT_PUT_STRATEGIES + (STRATEGY_IRON_CONDOR, STRATEGY_BULL_CALL)
+# A risk reversal has a net credit (no credit / width) and no cap above, so it too has its own block.
+# The three bearish strategies (bear call, bear put, long put) also have their own blocks; the
+# put buyers carry no credit at all.
+NOT_CASE_STRATEGIES = LOT_PUT_STRATEGIES + (STRATEGY_IRON_CONDOR, STRATEGY_BULL_CALL, STRATEGY_RR,
+                                            STRATEGY_BEAR_CALL, STRATEGY_BEAR_PUT,
+                                            STRATEGY_LONG_PUT)
+# Where the expiry close landed; an early close writes no zone and is counted apart.
+RR_ZONES = ("up", "dead", "down")
 # An early close never records a breached side, so it is counted apart rather than guessed.
 CONDOR_BREACHED_KEYS = ("none", "put", "call", "unrecorded")
 
@@ -134,6 +142,75 @@ def bullcall_stats(records: list[dict]) -> dict | None:
         "captured_avg_winners": sum(captured) / len(captured) if captured else None,
         "total_pnl": round(sum(r.get("pnl") or 0.0 for r in settled), 2) + 0.0,
     }
+
+
+def rr_stats(records: list[dict]) -> dict | None:
+    """Settled risk reversals: wins, win rate, option-leg pnl, how many expired in each zone
+    (up / dead / down), the average pnl of the "down" (assigned) trades. None when there are none.
+
+    No required win rate: a structure with no cap above has no debit / width ratio."""
+    settled = [r for r in records if strategy_of(r) == STRATEGY_RR
+               and r.get("status") in SETTLED_STATUSES]
+    if not settled:
+        return None
+    wins = [r for r in settled if (r.get("pnl") or 0.0) > 0]
+    zones = {z: sum(1 for r in settled if r.get("outcome_zone") == z) for z in RR_ZONES}
+    down = [r.get("pnl") or 0.0 for r in settled if r.get("outcome_zone") == "down"]
+    return {
+        "n": len(settled), "wins": len(wins), "win_rate": len(wins) / len(settled),
+        "total_pnl": round(sum(r.get("pnl") or 0.0 for r in settled), 2) + 0.0,
+        "zones": zones, "no_zone": len(settled) - sum(zones.values()),
+        "avg_down_pnl": round(sum(down) / len(down), 2) + 0.0 if down else None,
+    }
+
+
+def _settled_of(records: list[dict], strategy: str) -> list[dict]:
+    return [r for r in records if strategy_of(r) == strategy
+            and r.get("status") in SETTLED_STATUSES]
+
+
+def _wins_and_total(settled: list[dict]) -> tuple[list[dict], dict]:
+    wins = [r for r in settled if (r.get("pnl") or 0.0) > 0]
+    return wins, {"n": len(settled), "wins": len(wins), "win_rate": len(wins) / len(settled),
+                  "total_pnl": round(sum(r.get("pnl") or 0.0 for r in settled), 2) + 0.0}
+
+
+def bearcall_stats(records: list[dict]) -> dict | None:
+    """Settled bear call credit spreads: wins, win rate, per-trade average required win rate
+    (1 - credit / width), total pnl. None when there are none."""
+    settled = _settled_of(records, STRATEGY_BEAR_CALL)
+    if not settled:
+        return None
+    _, block = _wins_and_total(settled)
+    required = [breakeven_win_rate(r["credit"], r["width"]) for r in settled]
+    return {**block, "required_avg": sum(required) / len(required)}
+
+
+def bearput_stats(records: list[dict]) -> dict | None:
+    """Settled bear put debit spreads: wins, win rate, per-trade average required win rate
+    (debit / width), winners' average fraction of max profit captured, total pnl."""
+    settled = _settled_of(records, STRATEGY_BEAR_PUT)
+    if not settled:
+        return None
+    wins, block = _wins_and_total(settled)
+    required = [bearput_required_win_rate(r["debit"], r["width"]) for r in settled]
+    captured = [r["fraction_of_max_captured"] for r in wins
+                if r.get("fraction_of_max_captured") is not None]
+    return {**block, "required_avg": sum(required) / len(required),
+            "captured_avg_winners": sum(captured) / len(captured) if captured else None}
+
+
+def longput_stats(records: list[dict]) -> dict | None:
+    """Settled long puts: wins, win rate, average win, average loss (a positive magnitude),
+    total pnl. No required win rate: a single long leg has no debit / width ratio."""
+    settled = _settled_of(records, STRATEGY_LONG_PUT)
+    if not settled:
+        return None
+    wins, block = _wins_and_total(settled)
+    losses = [-(r.get("pnl") or 0.0) for r in settled if (r.get("pnl") or 0.0) < 0]
+    return {**block,
+            "avg_win": round(sum(r["pnl"] for r in wins) / len(wins), 2) + 0.0 if wins else None,
+            "avg_loss": round(sum(losses) / len(losses), 2) + 0.0 if losses else None}
 
 
 def pnl_if_closed(case: dict, row: dict) -> float:

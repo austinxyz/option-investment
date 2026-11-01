@@ -249,8 +249,22 @@ def _holding_warnings(ctx: DecisionContext, picks) -> list[str]:
     return out
 
 
+def _bear_warnings(ctx: DecisionContext, picks) -> list[str]:
+    """The bear leaves do not split on regime / IV, so those two only warn (never re-rank)."""
+    listed = {p.strategy for p in picks}
+    if not listed & R.BEAR_PICKS:
+        return []
+    out = []
+    if ctx.regime in R.BEAR_AGAINST_TREND_REGIMES:
+        out.append(T.WARN["bear_against_trend"])
+    if R.BEAR_PUT_KEY in listed and ctx.iv is not None and ctx.iv.label == R.IV_HIGH:
+        out.append(T.WARN["bear_put_iv_high"])
+    return out + [T.WARN["bear_drift"]]
+
+
 def _warnings(ctx: DecisionContext, leaf_warns, picks, sigma) -> tuple[str, ...]:
-    out = [T.WARN[k] for k in leaf_warns] + _holding_warnings(ctx, picks)
+    out = [T.WARN[k] for k in leaf_warns] + _bear_warnings(ctx, picks)
+    out += _holding_warnings(ctx, picks)
     out += _earnings_warnings(ctx, picks)
     if any(p.strategy in R.SELLER_PICKS for p in picks) and _thin_iv(ctx):
         out.append(T.WARN["thin_iv"].format(

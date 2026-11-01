@@ -14,6 +14,7 @@ Natural language or explicit. Parse into one of four actions:
 |--------|---------------|-------------|
 | suggest | "给 ZZZQ 出个铁鹰" / "宽度 5 的" | `suggest TICKER [--width W]` — 不写账本 |
 | open | "ZZZQ 开 0.15 档" / "开 2 张" | `open TICKER {0.10,0.15,0.20} [--contracts N] [--width W]` — 记录已保存的候选，默认 1 张 |
+| open（按推荐） | "按 /strategy-pick 的推荐开 ZZZQ" | `open TICKER --from-pick [--contracts N] [--width W]` — 档位改为读今天 `/strategy-pick TICKER` 的铁鹰推荐（Delta 目标就近放进档位，与报告里 `open` 那行同一规则），控制台先打印 `按 /strategy-pick <日期> 的结果：Delta 目标 … → 档位 …`；档位与 `--from-pick` 二选一。只读**今天**的 `data/strategy-picks/<今天>-<TICKER>.json`（demo 数据源读其下 `demo/`）：今天没跑过、文件是旧的、格式不对、推荐里没有铁鹰，都直接拒绝（退出码 2，什么都不写），不会回落到更早的结果；先重跑 `/strategy-pick TICKER`。其余校验（已保存候选、宽度核对）不变 |
 | status | "看一下模拟盘" | `status`（与 `/spread-sim` 共用 `spread_sim.py`） |
 | close | "提前平仓 #7" | `close ID`（同上） |
 
@@ -22,6 +23,7 @@ All calls run from the repo root:
 ```bash
 ./.venv/Scripts/python.exe scripts/condor_sim.py suggest TICKER [--width W]
 ./.venv/Scripts/python.exe scripts/condor_sim.py open TICKER {0.10,0.15,0.20} [--contracts N] [--width W]
+./.venv/Scripts/python.exe scripts/condor_sim.py open TICKER --from-pick [--contracts N] [--width W]
 ./.venv/Scripts/python.exe scripts/condor_sim.py status
 ./.venv/Scripts/python.exe scripts/condor_sim.py close ID
 ```

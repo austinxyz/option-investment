@@ -31,6 +31,7 @@ BEAR_BRANCHES = (R.BRANCH_HELD, R.BRANCH_NOT_HELD)
 STRATEGY_FAMILY = {
     R.SELL_PAIR: "sell", "cash_secured_put": "sell", "bull_put_spread": "sell",
     "covered_call": "sell", "bull_call_spread": "buy", "iron_condor": "range",
+    R.BEAR_PUT_KEY: "buy", R.BEAR_CALL_KEY: "sell",
     "collar": "protect", "protective_put": "protect", "hold": "neutral",
     "no_options": "neutral", "wait_earnings": "neutral", "reduce_position": "neutral",
 }

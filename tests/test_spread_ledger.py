@@ -465,3 +465,95 @@ def test_covered_contracts_ignores_bull_call():
     assert led.covered_contracts(ledger, ("acct1", "L1", "ABC")) == 0
     ledger, _ = led.add_spread(ledger, _cc("L1", expiry="2026-10-30", contracts=2))
     assert led.covered_contracts(ledger, ("acct1", "L1", "ABC")) == 2
+
+
+# --- risk reversal ledger constants -----------------------------------------
+
+def test_risk_reversal_constants():
+    assert led.STRATEGY_RR == "risk_reversal"
+    assert led.RR_STRIKE_KEYS == ("short_put_strike", "long_call_strike")
+    assert led.RR_LABEL == "风险反转"
+    assert led.strategy_of({"strategy": "risk_reversal"}) == led.STRATEGY_RR
+    assert led.STRATEGY_RR not in led.LOT_STRATEGIES
+    assert led.STRATEGY_RR not in led.CALL_WRITING
+
+
+def test_risk_reversal_blocks_same_ticker_same_expiry_and_ignores_cover():
+    rr = _rec(strategy="risk_reversal")
+    for other in _others() + [_condor()]:
+        ledger, _ = led.add_spread(led.empty_ledger(), other)
+        with pytest.raises(led.LedgerError):
+            led.add_spread(ledger, rr)
+    ledger, _ = led.add_spread(led.empty_ledger(), _rec(strategy="risk_reversal", contracts=5))
+    assert led.covered_contracts(ledger, ("acct1", "L1", "ABC")) == 0
+
+
+# --- bearish strategies ledger constants ------------------------------------
+
+def _bearcall(**extra):
+    return _rec(strategy="bear_call_spread", **extra)
+
+
+def _bearput(**extra):
+    return _rec(strategy="bear_put_spread", **extra)
+
+
+def _longput(**extra):
+    return _rec(strategy="long_put", **extra)
+
+
+def _bearish_makers():
+    return [_bearcall, _bearput, _longput]
+
+
+def test_strategy_of_recognizes_each_new_strategy():
+    assert led.STRATEGY_BEAR_CALL == "bear_call_spread"
+    assert led.STRATEGY_BEAR_PUT == "bear_put_spread"
+    assert led.STRATEGY_LONG_PUT == "long_put"
+    assert led.BEARCALL_LABEL == "Call 贷方价差"
+    assert led.BEARPUT_LABEL == "Put 借方价差"
+    assert led.LONGPUT_LABEL == "买入 Put"
+    for key in (led.STRATEGY_BEAR_CALL, led.STRATEGY_BEAR_PUT, led.STRATEGY_LONG_PUT):
+        assert led.strategy_of({"strategy": key}) == key
+        assert key not in led.LOT_STRATEGIES
+        assert key not in led.CALL_WRITING
+
+
+def test_strategy_of_missing_key_still_bull_put_bearish():
+    assert led.strategy_of({}) == led.STRATEGY_BULL_PUT
+    assert led.strategy_of({"strategy": None}) == led.STRATEGY_BULL_PUT
+
+
+def test_new_strategies_block_same_ticker_same_expiry_any_strategy():
+    for make in _bearish_makers():
+        for other in _others() + [_condor(), _bullcall(), _rec(strategy="risk_reversal")] \
+                + [m() for m in _bearish_makers()]:
+            ledger, _ = led.add_spread(led.empty_ledger(), other)
+            with pytest.raises(led.LedgerError):
+                led.add_spread(ledger, make())
+            ledger, _ = led.add_spread(led.empty_ledger(), make())
+            with pytest.raises(led.LedgerError):
+                led.add_spread(ledger, other)
+
+
+def test_new_strategies_do_not_block_other_expiry():
+    for make in _bearish_makers():
+        ledger, _ = led.add_spread(led.empty_ledger(), make())
+        ledger, stored = led.add_spread(ledger, _rec(expiry="2026-10-30"))
+        assert stored["id"] == 2
+        ledger, stored = led.add_spread(ledger, make(expiry="2026-11-06"))
+        assert stored["id"] == 3
+        ledger, stored = led.add_spread(ledger, make(ticker="XYZ"))
+        assert stored["id"] == 4
+
+
+def test_covered_contracts_ignores_new_strategies():
+    for make in _bearish_makers():
+        ledger, _ = led.add_spread(led.empty_ledger(), make(contracts=5))
+        assert led.covered_contracts(ledger, ("acct1", "L1", "ABC")) == 0
+        ledger, _ = led.add_spread(ledger, _cc("L1", expiry="2026-10-30", contracts=2))
+        assert led.covered_contracts(ledger, ("acct1", "L1", "ABC")) == 2
+
+
+def test_bearput_strike_keys_order_long_then_short():
+    assert led.BEARPUT_STRIKE_KEYS == ("long_put_strike", "short_put_strike")

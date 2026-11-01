@@ -2,6 +2,7 @@
 """Cash-secured put screen — CLI.
 
     put_screen.py suggest [--dte {weekly,monthly}] [--tickers A,B] [--delta X]  # default weekly; screen the universe, save candidates (no ledger write)
+    put_screen.py suggest [--dte ...] --from-pick TICKER  # ticker + Delta from today's /strategy-pick
     put_screen.py open TICKER [--contracts N]  # records the saved candidate, never re-fetches
     put_screen.py status                     # shared with spread_sim (spreads and puts together)
     put_screen.py close ID
@@ -26,6 +27,7 @@ import put_screen_wiki
 import spread_data
 import spread_ledger as ledger_mod
 import spread_sim
+import strategy_pick_frompick as frompick
 
 REPO = Path(__file__).resolve().parent.parent
 WIKI_DIR = REPO / "wiki"
@@ -338,8 +340,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--tickers", type=_tickers_arg, default=None, metavar="AAA,BBB",
                    help="只筛这些代码（优先于 wiki 和 data/watchlist.txt）")
     s.add_argument("--delta", type=rules.delta_arg, default=rules.TARGET_DELTA, metavar="0.15",
+                   action=frompick.StoreGiven,
                    help="短 Put 的目标 Delta（0.05–0.40，最多两位小数；默认 0.20）；"
                         "价差过宽时往外最多走到 0.10 或目标（取小者）")
+    s.add_argument("--from-pick", type=spread_sim._ticker_arg, default=None, metavar="TICKER",
+                   help="读今天 /strategy-pick TICKER 的现金担保 Put 推荐：只筛这一只，"
+                        "Delta 用它的目标（不能和 --tickers / --delta 同用）")
     o = sub.add_parser("open", help="记录已保存的候选")
     o.add_argument("ticker", type=spread_sim._ticker_arg)
     o.add_argument("--contracts", type=spread_sim._positive_int, default=1)
@@ -352,10 +358,35 @@ def build_parser() -> argparse.ArgumentParser:
 COMMANDS = {"suggest": cmd_suggest, "open": cmd_open, "status": cmd_status, "close": cmd_close}
 
 
+FROM_PICK_EXCLUSIVE = "--from-pick 不能和 --tickers / --delta 一起用：ticker 和 Delta 都从今天的推荐里读"
+
+
+def _from_pick(parser: argparse.ArgumentParser, args, today: date) -> str | None:
+    """Fill --tickers / --delta from today's cash-secured-put pick; the console line, or None."""
+    if getattr(args, "from_pick", None) is None:
+        return None
+    if args.tickers is not None or getattr(args, "delta_given", False):
+        parser.error(FROM_PICK_EXCLUSIVE)
+    ticker, args.delta, line = frompick.screen_from_pick(args.from_pick, "cash_secured_put", today)
+    args.tickers = ticker
+    return line
+
+
 def main(argv: list[str] | None = None, today: date | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        pick_line = _from_pick(parser, args, today or date.today())
+    except frompick.FromPickError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return frompick.EXIT_FROM_PICK
+    except option_settings.SettingsError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 1
     try:
         option_labels.print_console_header()
+        if pick_line:
+            print(pick_line)
         ledger_dir = spread_sim.resolve_ledger_dir(args.ledger_dir)
         return COMMANDS[args.cmd](args, ledger_dir, today or date.today())
     except NothingToScreen as exc:

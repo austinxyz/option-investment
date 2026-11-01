@@ -88,6 +88,8 @@ BULLCALL_LONG_DELTA = (0.50, 0.60)
 CONDOR_SHORT_DELTA = 0.15
 COLLAR_PUT_DELTA = (0.20, 0.30)
 COLLAR_CALL_DELTA = 0.20
+BEARPUT_LONG_DELTA = (0.50, 0.60)
+BEARCALL_SHORT_DELTA = FAR_OTM_DELTA
 Z_BY_DELTA = {0.30: 0.52, 0.20: 0.84, 0.15: 1.04, 0.10: 1.28}
 
 # Holding (6.11).
@@ -96,10 +98,14 @@ MIN_LOT_SHARES = 100
 # Strategy vocabulary (6.8, 6.12).
 STRATEGIES = ("cash_secured_put", "bull_put_spread", "bull_call_spread", "iron_condor",
               "covered_call", "collar", "protective_put", "hold", "no_options",
-              "wait_earnings", "reduce_position")
+              "wait_earnings", "reduce_position", "bear_put_spread", "bear_call_spread")
+# "bearish" now means the single-leg long put: never picked, only /longput-sim by hand.
 NOT_CHOSEN_ONLY = ("long_call", "naked_call", "bearish", "wheel")
-FORBIDDEN_PICKS = frozenset({"long_call", "naked_call", "naked_put", "bearish",
-                             "bear_put_spread", "bear_call_spread", "long_put"})
+FORBIDDEN_PICKS = frozenset({"long_call", "naked_call", "naked_put", "bearish", "long_put"})
+BEAR_PUT_KEY, BEAR_CALL_KEY = "bear_put_spread", "bear_call_spread"
+BEAR_PICKS = frozenset({BEAR_PUT_KEY, BEAR_CALL_KEY})
+# Bear view while the year's regime is a steady rise: the spread is against the trend (warning).
+BEAR_AGAINST_TREND_REGIMES = frozenset({"steady_up"})
 BULLISH_OPEN = frozenset({"cash_secured_put", "bull_put_spread", "bull_call_spread",
                           "iron_condor", "covered_call", "long_call"})
 ALL_STRATEGY_KEYS = STRATEGIES + NOT_CHOSEN_ONLY
@@ -107,7 +113,7 @@ ALL_STRATEGY_KEYS = STRATEGIES + NOT_CHOSEN_ONLY
 WHY_NOT_CODES = ("not_held", "held_no_lot", "iv_high_buyer", "iv_low_seller",
                  "trend_not_range", "range_not_trend", "high_vol_buyer", "view_not_bullish",
                  "never_bearish", "never_naked", "no_tool", "wheel_is_flow",
-                 "earnings_imminent",
+                 "earnings_imminent", "view_not_bearish",
                  "held_use_shares", "downtrend", "trend_unclear", "needs_floor", "upside_capped",
                  "leaf_choice", "option_fits", "wait_not_triggered", "reduce_not_applicable",
                  "gate_failed", "history_short")
@@ -146,14 +152,17 @@ LEG_PLANS = {
     "collar": (("long_put", -1, COLLAR_PUT_DELTA),
                ("short_call", 1, (COLLAR_CALL_DELTA, COLLAR_CALL_DELTA))),
     "protective": (("long_put", -1, COLLAR_PUT_DELTA),),
+    "bearput": (("long_put", 0, BEARPUT_LONG_DELTA),),
+    "bearcall": (("short_call", 1, BEARCALL_SHORT_DELTA),),
 }
 PLAN_FLAGS = {"put_far": ("far_otm",), "call_far": ("far_otm",)}
 # The CSP-vs-Bull-Put share uses the 0.20 strike, or the 0.15 strike when far OTM (V9: 90.78).
 RANK_DELTA_BY_PLAN = {"put_normal": NORMAL_DELTA, "put_far": max(FAR_OTM_DELTA)}
 
 # Pick modifiers (6.6 THIN_IV, 6.10 earnings / ex-div, 6.11 LTCG and reduce hint).
-SELLER_PICKS = frozenset({"cash_secured_put", "bull_put_spread", "iron_condor", "covered_call"})
-EARNINGS_SENSITIVE = SELLER_PICKS  # the four strategies 6.10 names
+SELLER_PICKS = frozenset({"cash_secured_put", "bull_put_spread", "iron_condor", "covered_call",
+                          "bear_call_spread"})
+EARNINGS_SENSITIVE = SELLER_PICKS  # the four strategies 6.10 names, plus the Bear Call seller
 EARNINGS_AVOID_CLASSES = frozenset({"hot"})
 EARNINGS_WARN_CLASSES = frozenset({"bluechip"})
 NO_EARNINGS_CLASSES = frozenset({"etf"})
@@ -212,8 +221,9 @@ _LEAF_ROWS = (
     ("neutral", "held", "*", "*", _CC_FAR, ()),
 )
 _SPECIAL_LEAVES = {
-    "bear.held": ((_p("reduce_position"), _p("collar", "collar")), ("bear_held",)),
-    "bear.not_held": ((_p("no_options"),), ("bear_not_held",)),
+    "bear.held": ((_p("reduce_position"), _p(BEAR_PUT_KEY, "bearput")), ("bear_held",)),
+    "bear.not_held": ((_p(BEAR_PUT_KEY, "bearput"), _p(BEAR_CALL_KEY, "bearcall")),
+                      ("bear_not_held",)),
     LEAF_GATE_FAIL: ((_p("no_options"),), ()),
     LEAF_HISTORY_SHORT: ((_p("no_options"),), ()),
 }
@@ -235,6 +245,7 @@ LEAF_TABLE = _expand_leaves()
 # Condition keys: view / held (held, not_held, no_lot) / regime / iv.
 _BEAR, _HELD = {"view": {"bear"}}, {"held": {"held"}}
 _NO_LOT, _NOT_HELD = {"held": {"no_lot"}}, {"held": {"not_held"}}
+_NOT_BEAR = {"view": {"bull", "neutral"}}
 _SELLER_PUT_RULES = ((_BEAR, "view_not_bullish"), (_HELD, "held_use_shares"),
                      ({"regime": {"range"}}, "range_not_trend"),
                      ({"regime": {"down"}}, "downtrend"), ({"iv": {"low"}}, "iv_low_seller"),
@@ -266,6 +277,10 @@ REASON_RULES = {
     "no_options": (({}, "option_fits"),),
     "wait_earnings": (({}, "wait_not_triggered"),),
     "reduce_position": (({}, "reduce_not_applicable"),),
+    BEAR_PUT_KEY: ((_NOT_BEAR, "view_not_bearish"), ({}, "leaf_choice")),
+    # Shares held: no short-call spread on top of long stock (directions conflict).
+    BEAR_CALL_KEY: ((_NOT_BEAR, "view_not_bearish"), (_HELD, "held_use_shares"),
+                    ({}, "leaf_choice")),
     "long_call": (({}, "no_tool"),),
     "naked_call": (({}, "never_naked"),),
     "bearish": (({}, "never_bearish"),),

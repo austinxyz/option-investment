@@ -644,3 +644,50 @@ def test_call_cli_shares_delta_arg():
     sub = next(a for a in call_screen.build_parser()._actions if a.dest == "cmd")
     delta = next(a for a in sub.choices["suggest"]._actions if a.dest == "delta")
     assert delta.type is put_screen_rules.delta_arg is call_screen.rules.delta_arg
+
+
+# --- --from-pick (today's /strategy-pick result) ---------------------------------------------------
+from datetime import timedelta
+
+from frompick_fixtures import use_folder, write_pick
+
+
+@pytest.fixture
+def picks(monkeypatch, tmp_path):
+    return use_folder(monkeypatch, tmp_path / "picks")
+
+
+@pytest.mark.parametrize("extra", [("--delta", "0.15"), ("--delta", "0.20")])
+def test_from_pick_excludes_delta(env, picks, capsys, extra):
+    write_pick(picks, "AAA", TODAY, "covered_call", 0.10, 0.15)
+    with pytest.raises(SystemExit) as exc:
+        run(env, "suggest", "--from-pick", "AAA", *extra)
+    assert exc.value.code == 2
+    assert "--from-pick 不能和 --delta 一起用" in capsys.readouterr().err
+    assert not env["ledger"].exists()
+
+
+@pytest.mark.parametrize("case", ["missing", "stale_run_date", "no_call_pick"])
+def test_from_pick_refusal_exit_2_touches_nothing(env, picks, capsys, case):
+    if case == "stale_run_date":
+        write_pick(picks, "AAA", TODAY - timedelta(days=1), "covered_call", 0.10, 0.15,
+                   file_date=TODAY)
+    elif case == "no_call_pick":
+        write_pick(picks, "AAA", TODAY, "cash_secured_put", 0.10, 0.15)
+    assert run(env, "suggest", "--from-pick", "aaa") == 2
+    out, err = capsys.readouterr()
+    assert out == "" and err.startswith("错误：")
+    assert not env["ledger"].exists()
+
+
+def test_from_pick_equals_manual_handoff(env, picks, capsys):
+    write_pick(picks, "AAA", TODAY, "covered_call", 0.10, 0.15)
+    manual, manual_out = _run_collect(env, capsys, "--delta", "0.15")
+    picked, picked_out = _run_collect(env, capsys, "--from-pick", "AAA")
+    assert picked == manual
+    line = ("按 /strategy-pick 2026-10-17 的结果：Delta 目标 0.10–0.15 → --delta 0.15"
+            "；它扫全部持股，`--delta` 对这次扫的每只持股都生效")
+    lines = picked_out.splitlines()
+    assert lines.count(line) == 1
+    lines.remove(line)
+    assert lines == manual_out.splitlines()  # exactly one extra console line
